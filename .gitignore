@@ -13,3 +13,14 @@ tmp/
 .venv/
 agentdecompile_projects/
 export/
+scripts/ghidra_apply_k1_metadata.py
+scripts/ghidra_export_k1_metadata.py
+scripts/ghidra_propagate_from_k1.py
+scripts/ghidra_source_export_test.json
+scripts/k1_metadata_apply_report.json
+scripts/k1_win_gog_metadata.json
+scripts/run_ghidra_apply_all_safe.ps1
+scripts/run_ghidra_apply_all.ps1
+scripts/run_ghidra_apply_one_audited.ps1
+scripts/summarize_k1_metadata_report.ps1
+scripts/metadata-audit/K1_k1_win_amazongames_swkotor.exe_audit.json

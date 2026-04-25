@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { AdvisorAction, AdvisorAlternative, AdvisorCategory, AdvisorConfidence, AdvisorDifficulty, AdvisorSnapshot, SerializedMatch, SerializedPlayerState, SideCardOption } from "../types.ts";
 import type { MatchSocketConnectionState } from "../api.ts";
-import { draw, stand, endTurn, playSideCard, forfeit } from "../api.ts";
+import { draw, stand, endTurn, playSideCard, forfeit, fetchMe } from "../api.ts";
 import { getAdvisorSnapshot, getSideCardOptions, WIN_SCORE, SETS_TO_WIN } from "../game-utils.ts";
 import { QuickSideboardSwitcher } from "./QuickSideboardSwitcher.tsx";
 
@@ -12,21 +12,25 @@ interface GameBoardProps {
   socketState: MatchSocketConnectionState;
   onMatchUpdate: (match: SerializedMatch) => void;
   onOpenWorkshop: () => void;
+  onReturnToLobby?: () => void;
   onExit: () => void;
 }
 
-export function GameBoard({ match, userId, accessToken, socketState, onMatchUpdate, onOpenWorkshop, onExit }: GameBoardProps) {
+export function GameBoard({ match, userId, accessToken, socketState, onMatchUpdate, onOpenWorkshop, onReturnToLobby, onExit }: GameBoardProps) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [advisorDifficulty, setAdvisorDifficulty] = useState<AdvisorDifficulty>("professional");
   const [roundSummary, setRoundSummary] = useState<{ title: string; body: string } | null>(null);
   const [actionLog, setActionLog] = useState<Array<{ id: string; text: string; at: number }>>([]);
+  const [timerSecondsLeft, setTimerSecondsLeft] = useState<number | null>(null);
+  const [preGameMmr, setPreGameMmr] = useState<number | null>(null);
+  const [postGameMmr, setPostGameMmr] = useState<number | null>(null);
 
   const previousSetRef = useRef(match.setNumber);
   const previousStatusLineRef = useRef(match.statusLine);
 
   const myPlayer = match.players.find((p) => p.userId === userId) ?? null;
-  const opponent = match.players.find((p) => p.userId !== userId) ?? null;
+  const opponents = match.players.filter((p) => p.userId !== userId);
   const isMyTurn = match.activePlayerIndex === match.players.findIndex((p) => p.userId === userId);
 
   const act = async (fn: () => Promise<SerializedMatch>) => {
@@ -83,6 +87,30 @@ export function GameBoard({ match, userId, accessToken, socketState, onMatchUpda
     previousSetRef.current = match.setNumber;
   }, [match.players, match.setNumber, match.statusLine]);
 
+  useEffect(() => {
+    if (!match.turnDeadlineAt || isCompleted) {
+      setTimerSecondsLeft(null);
+      return;
+    }
+    const update = () => {
+      const secondsLeft = Math.max(0, Math.floor((match.turnDeadlineAt! - Date.now()) / 1000));
+      setTimerSecondsLeft(secondsLeft);
+    };
+    update();
+    const id = window.setInterval(update, 500);
+    return () => window.clearInterval(id);
+  }, [match.turnDeadlineAt, isCompleted]);
+
+  useEffect(() => {
+    fetchMe(accessToken).then((me) => setPreGameMmr(me.wallet.mmr)).catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    if (!isCompleted) return;
+    fetchMe(accessToken).then((me) => setPostGameMmr(me.wallet.mmr)).catch(() => {});
+  }, [isCompleted, accessToken]);
+
   return (
     <div className="game-board">
       {/* Header */}
@@ -90,6 +118,11 @@ export function GameBoard({ match, userId, accessToken, socketState, onMatchUpda
         <span className="game-header__title">Pazaak Table</span>
         <span className="game-header__set">Set {match.setNumber}</span>
         <span className="game-header__wager">⚙ {match.wager} credits</span>
+        {timerSecondsLeft !== null && (
+          <span className={`game-header__timer ${timerSecondsLeft <= 10 ? "game-header__timer--urgent" : ""}`}>
+            {`${String(Math.floor(timerSecondsLeft / 60)).padStart(2, "0")}:${String(timerSecondsLeft % 60).padStart(2, "0")}`}
+          </span>
+        )}
         {myPlayer ? (
           <span className={`game-header__connection ${disconnectedSince[myPlayer.userId] ? "game-header__connection--bad" : "game-header__connection--ok"}`}>
             {disconnectedSince[myPlayer.userId]
@@ -186,14 +219,15 @@ export function GameBoard({ match, userId, accessToken, socketState, onMatchUpda
 
       {/* Players */}
       <div className="players">
-        {opponent && (
+        {opponents.map((opp) => (
           <PlayerPanel
-            player={opponent}
-            isActive={!isMyTurn && !isCompleted}
-            label="Opponent"
-            connectionState={disconnectedSince[opponent.userId] ? "disconnected" : aiSeats[opponent.userId] ? "ai_takeover" : "connected"}
+            key={opp.userId}
+            player={opp}
+            isActive={!isMyTurn && !isCompleted && match.players[match.activePlayerIndex]?.userId === opp.userId}
+            label={opponents.length > 1 ? opp.displayName : "Opponent"}
+            connectionState={disconnectedSince[opp.userId] ? "disconnected" : aiSeats[opp.userId] ? "ai_takeover" : "connected"}
           />
-        )}
+        ))}
         {myPlayer ? (
           <PlayerPanel
             player={myPlayer}
@@ -285,7 +319,25 @@ export function GameBoard({ match, userId, accessToken, socketState, onMatchUpda
             <p className="game-result__draw">It's a draw.</p>
           )}
           <p className="game-result__status">{match.statusLine}</p>
-          <button className="btn btn--ghost" onClick={onExit}>Close Activity</button>
+          {postGameMmr !== null && (() => {
+            const delta = preGameMmr !== null ? postGameMmr - preGameMmr : null;
+            return (
+              <p className="game-result__mmr">
+                MMR: {postGameMmr}
+                {delta !== null && (
+                  <span className={`game-result__mmr-delta ${delta >= 0 ? "game-result__mmr-delta--gain" : "game-result__mmr-delta--loss"}`}>
+                    {delta >= 0 ? `+${delta}` : `${delta}`}
+                  </span>
+                )}
+              </p>
+            );
+          })()}
+          <div className="game-result__actions">
+            {onReturnToLobby && (
+              <button className="btn btn--secondary" onClick={onReturnToLobby}>Return to Lobby</button>
+            )}
+            <button className="btn btn--ghost" onClick={onExit}>Close Activity</button>
+          </div>
         </div>
       )}
 

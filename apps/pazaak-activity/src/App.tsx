@@ -230,6 +230,7 @@ export default function App() {
       socketState={matchSocketState}
       onMatchUpdate={(match) => setState({ stage: "game", auth: state.auth, match })}
       onOpenWorkshop={() => setState({ stage: "workshop", auth: state.auth, returnTo: "game", match: state.match })}
+      onReturnToLobby={() => setState({ stage: "lobby", auth: state.auth })}
       onExit={() => closeActivity("Player exited game")}
     />
   );
@@ -596,6 +597,7 @@ function LobbyScreen({
   const [leaders, setLeaders] = useState<LeaderboardEntry[]>([]);
   const [history, setHistory] = useState<PazaakMatchHistoryRecord[]>([]);
   const [newLobbyName, setNewLobbyName] = useState(`${username}'s Table`);
+  const [newLobbyPassword, setNewLobbyPassword] = useState("");
   const [newLobbyVariant, setNewLobbyVariant] = useState<PazaakTableVariant>("canonical");
   const [newLobbyMaxPlayers, setNewLobbyMaxPlayers] = useState(2);
   const [newLobbyMaxRounds, setNewLobbyMaxRounds] = useState(3);
@@ -656,6 +658,7 @@ function LobbyScreen({
     await createLobby(accessToken, {
       name: newLobbyName,
       maxPlayers,
+      ...(newLobbyPassword ? { password: newLobbyPassword } : {}),
       variant: newLobbyVariant,
       maxRounds: newLobbyMaxRounds,
       turnTimerSeconds: newLobbyTurnTimer,
@@ -754,6 +757,14 @@ function LobbyScreen({
             </div>
             <div className="lobby-create">
               <input value={newLobbyName} onChange={(event) => setNewLobbyName(event.target.value)} aria-label="Lobby name" />
+              <input
+                type="password"
+                value={newLobbyPassword}
+                onChange={(event) => setNewLobbyPassword(event.target.value)}
+                placeholder="Password (optional)"
+                aria-label="Lobby password"
+                autoComplete="new-password"
+              />
               <select
                 value={newLobbyVariant}
                 onChange={(event) => {

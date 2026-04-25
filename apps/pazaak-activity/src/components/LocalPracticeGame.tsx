@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import type { AdvisorDifficulty } from "../types.ts";
 
-type LocalCardType = "plus" | "minus" | "flex";
+type LocalCardType = "plus" | "minus" | "flex" | "flip" | "tiebreaker";
 
 interface LocalSideCard {
   id: string;
@@ -18,6 +18,7 @@ interface LocalPlayer {
   roundWins: number;
   stood: boolean;
   bust: boolean;
+  hasTiebreaker: boolean;
   sideDeck: LocalSideCard[];
 }
 
@@ -55,7 +56,7 @@ const createMainDeck = (): number[] => {
 };
 
 const createSideDeck = (): LocalSideCard[] => {
-  return [
+  const deck: LocalSideCard[] = [
     { id: randomId(), label: "+1", value: 1, type: "plus", used: false },
     { id: randomId(), label: "+2", value: 2, type: "plus", used: false },
     { id: randomId(), label: "+3", value: 3, type: "plus", used: false },
@@ -67,6 +68,22 @@ const createSideDeck = (): LocalSideCard[] => {
     { id: randomId(), label: "+/-4", value: 4, type: "flex", used: false },
     { id: randomId(), label: "+5", value: 5, type: "plus", used: false },
   ];
+
+  // ~10% chance for a yellow special card (per PazaakWorld): flip or tiebreaker
+  if (Math.random() < 0.1) {
+    const roll = Math.random();
+    if (roll < 0.67) {
+      // Flip 3&6 or Flip 2&4
+      const flipValue = Math.random() < 0.5 ? 3 : 2;
+      const partner = flipValue === 3 ? 6 : 4;
+      deck.push({ id: randomId(), label: `Flip ${flipValue}&${partner}`, value: flipValue, type: "flip", used: false });
+    } else {
+      // Tiebreaker: adds +1 and wins any tied round
+      deck.push({ id: randomId(), label: "\xb11T", value: 1, type: "tiebreaker", used: false });
+    }
+  }
+
+  return deck;
 };
 
 const createPlayer = (name: string): LocalPlayer => ({
@@ -76,6 +93,7 @@ const createPlayer = (name: string): LocalPlayer => ({
   roundWins: 0,
   stood: false,
   bust: false,
+  hasTiebreaker: false,
   sideDeck: createSideDeck(),
 });
 
@@ -134,8 +152,8 @@ export function LocalPracticeGame({ username, difficulty, onExit }: LocalPractic
   };
 
   const resetRound = (nextHuman: LocalPlayer, nextAi: LocalPlayer) => {
-    setHuman({ ...nextHuman, board: [], total: 0, bust: false, stood: false, sideDeck: nextHuman.sideDeck });
-    setAi({ ...nextAi, board: [], total: 0, bust: false, stood: false, sideDeck: nextAi.sideDeck });
+    setHuman({ ...nextHuman, board: [], total: 0, bust: false, stood: false, hasTiebreaker: false, sideDeck: nextHuman.sideDeck });
+    setAi({ ...nextAi, board: [], total: 0, bust: false, stood: false, hasTiebreaker: false, sideDeck: nextAi.sideDeck });
     setMainDeck(createMainDeck());
     setRoundNumber((value) => value + 1);
     setIsHumanTurn(Math.random() > 0.5);
@@ -163,6 +181,15 @@ export function LocalPracticeGame({ username, difficulty, onExit }: LocalPractic
     } else if (!scoredHuman.bust && !scoredAi.bust && scoredAi.total > scoredHuman.total) {
       nextAi.roundWins += 1;
       summary = `${ai.name} wins set ${roundNumber} (${scoredAi.total} to ${scoredHuman.total}).`;
+    } else if (!scoredHuman.bust && !scoredAi.bust && scoredHuman.total === scoredAi.total) {
+      // Tiebreaker resolution: if only one player has the tiebreaker flag, they win
+      if (scoredHuman.hasTiebreaker && !scoredAi.hasTiebreaker) {
+        nextHuman.roundWins += 1;
+        summary = `${human.name} wins set ${roundNumber} with Tiebreaker (${scoredHuman.total} tied)!`;
+      } else if (scoredAi.hasTiebreaker && !scoredHuman.hasTiebreaker) {
+        nextAi.roundWins += 1;
+        summary = `${ai.name} wins set ${roundNumber} with Tiebreaker (${scoredAi.total} tied)!`;
+      }
     }
 
     setRoundSummary(summary);
@@ -216,10 +243,39 @@ export function LocalPracticeGame({ username, difficulty, onExit }: LocalPractic
     const card = human.sideDeck.find((entry) => entry.id === cardId && !entry.used);
     if (!card) return;
 
+    const nextDeck = human.sideDeck.map((entry) => (entry.id === card.id ? { ...entry, used: true } : entry));
+
+    if (card.type === "flip") {
+      // Flip cards invert the sign of all board values equal to card.value or its partner
+      const flipValues = new Set([card.value, card.value * 2]);
+      const flipped = human.board.map((v) => (flipValues.has(Math.abs(v)) ? -v : v));
+      const next = scorePlayer({ ...human, sideDeck: nextDeck, board: flipped });
+      setHuman(next);
+      pushLog(`${human.name} plays ${card.label} — board flipped (total ${next.total}).`);
+      if (next.bust || next.board.length >= MAX_BOARD) {
+        setPhase("round_end");
+      } else {
+        setIsHumanTurn(false);
+      }
+      return;
+    }
+
+    if (card.type === "tiebreaker") {
+      // Tiebreaker: adds +1 to board and grants ability to win tied rounds
+      const next = scorePlayer({ ...human, sideDeck: nextDeck, board: [...human.board, 1], hasTiebreaker: true });
+      setHuman(next);
+      pushLog(`${human.name} plays \xb11T Tiebreaker — total ${next.total}, ties won this set.`);
+      if (next.bust || next.board.length >= MAX_BOARD) {
+        setPhase("round_end");
+      } else {
+        setIsHumanTurn(false);
+      }
+      return;
+    }
+
     const sign = card.type === "flex" ? (window.confirm(`Use ${card.label} as positive? Press Cancel for negative.`) ? 1 : -1) : card.type === "minus" ? -1 : 1;
     const delta = sign * card.value;
 
-    const nextDeck = human.sideDeck.map((entry) => (entry.id === card.id ? { ...entry, used: true } : entry));
     const next = scorePlayer({ ...human, sideDeck: nextDeck, board: [...human.board, delta] });
     setHuman(next);
     pushLog(`${human.name} plays ${card.label} as ${delta > 0 ? `+${delta}` : `${delta}`} (total ${next.total}).`);
@@ -272,6 +328,19 @@ export function LocalPracticeGame({ username, difficulty, onExit }: LocalPractic
 
   const canAct = phase === "playing" && isHumanTurn && !human.stood && !human.bust;
 
+  const restartGame = () => {
+    const freshHuman = createPlayer(username || "Player");
+    const freshAi = createPlayer(`AI ${formatDifficulty(difficulty)}`);
+    setHuman(freshHuman);
+    setAi(freshAi);
+    setMainDeck(createMainDeck());
+    setPhase("playing");
+    setIsHumanTurn(Math.random() > 0.5);
+    setRoundNumber(1);
+    setRoundSummary("New match started.");
+    setActionLog(["New match started."]);
+  };
+
   return (
     <div className="screen screen--lobby">
       <div className="local-game">
@@ -312,7 +381,14 @@ export function LocalPracticeGame({ username, difficulty, onExit }: LocalPractic
         <section className="local-game__actions">
           <button className="btn btn--primary" onClick={() => drawFor("human")} disabled={!canAct}>Draw</button>
           <button className="btn btn--secondary" onClick={humanStand} disabled={!canAct}>Stand</button>
-          <span>{phase === "game_end" ? `Winner: ${winner}` : roundSummary}</span>
+          {phase === "game_end" ? (
+            <span className="local-game__result">
+              <strong>Winner: {winner}</strong>
+              <button className="btn btn--primary" onClick={restartGame}>Play Again</button>
+            </span>
+          ) : (
+            <span>{roundSummary}</span>
+          )}
         </section>
 
         <section className="local-game__log">
