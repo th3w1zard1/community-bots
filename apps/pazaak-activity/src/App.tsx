@@ -288,6 +288,23 @@ function ModeSelectionScreen({
             </div>
           </article>
         </section>
+        <section className="mode-selection-rules">
+          <h3>How to Play Pazaak</h3>
+          <div className="mode-selection-rules__columns">
+            <div>
+              <h4>Goal</h4>
+              <p>Score as close to 20 as possible without going over. First player to win 3 sets wins the match.</p>
+            </div>
+            <div>
+              <h4>Each Turn</h4>
+              <p>Draw a card from the main deck (1–10), then optionally play a card from your side deck. Stand to lock in your score or keep drawing.</p>
+            </div>
+            <div>
+              <h4>Special Cards</h4>
+              <p><strong>+/-</strong> cards can be used as positive or negative. <strong>Flip</strong> cards invert matching board values. <strong>±1T</strong> adds 1 and lets you win tied sets.</p>
+            </div>
+          </div>
+        </section>
       </div>
     </div>
   );

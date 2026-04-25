@@ -23,6 +23,7 @@ export function GameBoard({ match, userId, accessToken, socketState, onMatchUpda
   const [roundSummary, setRoundSummary] = useState<{ title: string; body: string } | null>(null);
   const [actionLog, setActionLog] = useState<Array<{ id: string; text: string; at: number }>>([]);
   const [timerSecondsLeft, setTimerSecondsLeft] = useState<number | null>(null);
+  const [forfeitPending, setForfeitPending] = useState(false);
   const [preGameMmr, setPreGameMmr] = useState<number | null>(null);
   const [postGameMmr, setPostGameMmr] = useState<number | null>(null);
 
@@ -50,10 +51,9 @@ export function GameBoard({ match, userId, accessToken, socketState, onMatchUpda
   const handleStand = () => act(() => stand(match.id, accessToken));
   const handleEndTurn = () => act(() => endTurn(match.id, accessToken));
   const handlePlayCard = (option: SideCardOption) => act(() => playSideCard(match.id, accessToken, option));
-  const handleForfeit = () => {
-    if (!confirm("Are you sure you want to forfeit this match?")) return;
-    act(() => forfeit(match.id, accessToken));
-  };
+  const handleForfeit = () => setForfeitPending(true);
+  const confirmForfeit = () => { setForfeitPending(false); act(() => forfeit(match.id, accessToken)); };
+  const cancelForfeit = () => setForfeitPending(false);
 
   const cardOptions = myPlayer && (match.phase === "after-draw") && isMyTurn
     ? getSideCardOptions(myPlayer)
@@ -241,6 +241,15 @@ export function GameBoard({ match, userId, accessToken, socketState, onMatchUpda
         )}
       </div>
 
+      {/* Main Deck widget */}
+      {!isCompleted && (
+        <div className="main-deck-widget" aria-label="Main deck">
+          <div className="main-deck-widget__card-back" />
+          <span className="main-deck-widget__label">Main Deck</span>
+          <span className="main-deck-widget__count">{match.mainDeck.length} cards</span>
+        </div>
+      )}
+
       <section className="game-log">
         <header className="game-log__header">
           <span>Game Log</span>
@@ -305,6 +314,19 @@ export function GameBoard({ match, userId, accessToken, socketState, onMatchUpda
           <button className="btn btn--danger btn--sm" onClick={handleForfeit} disabled={busy}>
             Forfeit
           </button>
+        </div>
+      )}
+
+      {/* Forfeit confirmation overlay */}
+      {forfeitPending && (
+        <div className="game-board__overlay">
+          <div className="game-board__confirm-modal">
+            <p>Forfeit this match?</p>
+            <div className="game-board__confirm-modal__actions">
+              <button className="btn btn--danger" onClick={confirmForfeit}>Forfeit</button>
+              <button className="btn btn--ghost" onClick={cancelForfeit}>Cancel</button>
+            </div>
+          </div>
         </div>
       )}
 

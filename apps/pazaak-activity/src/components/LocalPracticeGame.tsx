@@ -117,6 +117,31 @@ const nextAiAction = (player: LocalPlayer, difficulty: AdvisorDifficulty): "draw
   return "draw";
 };
 
+/** Find the smallest minus/flex card that rescues the AI from a bust. */
+const aiPickRescueCard = (player: LocalPlayer): LocalSideCard | null => {
+  const overage = player.total - TARGET_SCORE;
+  return player.sideDeck
+    .filter((c) => !c.used && (c.type === "minus" || c.type === "flex") && c.value >= overage)
+    .sort((a, b) => a.value - b.value)[0] ?? null;
+};
+
+/** Find a card that brings the AI to exactly 20. */
+const aiPickExactCard = (player: LocalPlayer): LocalSideCard | null => {
+  const needed = TARGET_SCORE - player.total;
+  if (needed <= 0) return null;
+  return player.sideDeck.find((c) => {
+    if (c.used) return false;
+    if ((c.type === "plus" || c.type === "flex" || c.type === "tiebreaker") && c.value === needed) return true;
+    return false;
+  }) ?? null;
+};
+
+const getAiDelay = (difficulty: AdvisorDifficulty): number => {
+  if (difficulty === "easy") return 1000 + Math.random() * 2000;
+  if (difficulty === "hard") return 800 + Math.random() * 1200;
+  return 600 + Math.random() * 1000;
+};
+
 const scorePlayer = (player: LocalPlayer): LocalPlayer => {
   const total = player.board.reduce((sum, value) => sum + value, 0);
   return {
@@ -141,6 +166,17 @@ export function LocalPracticeGame({ username, difficulty, onExit }: LocalPractic
   const [roundNumber, setRoundNumber] = useState(1);
   const [roundSummary, setRoundSummary] = useState<string>("Local match started.");
   const [actionLog, setActionLog] = useState<string[]>(["Local match started."]);
+  const [flexPrompt, setFlexPrompt] = useState<{ cardId: string; label: string; value: number } | null>(null);
+  const [setResult, setSetResult] = useState<{
+    summary: string;
+    humanTotal: number;
+    aiTotal: number;
+    humanWins: number;
+    aiWins: number;
+    nextHuman: LocalPlayer;
+    nextAi: LocalPlayer;
+    nextFirst: "human" | "ai" | "random";
+  } | null>(null);
 
   const winner = useMemo(() => {
     if (phase !== "game_end") return null;
@@ -151,12 +187,13 @@ export function LocalPracticeGame({ username, difficulty, onExit }: LocalPractic
     setActionLog((previous) => [message, ...previous].slice(0, 16));
   };
 
-  const resetRound = (nextHuman: LocalPlayer, nextAi: LocalPlayer) => {
-    setHuman({ ...nextHuman, board: [], total: 0, bust: false, stood: false, hasTiebreaker: false, sideDeck: nextHuman.sideDeck });
-    setAi({ ...nextAi, board: [], total: 0, bust: false, stood: false, hasTiebreaker: false, sideDeck: nextAi.sideDeck });
+  const resetRound = (nextHuman: LocalPlayer, nextAi: LocalPlayer, firstTurn: "human" | "ai" | "random") => {
+    // Reset board + clear used-card flags so side cards are available each round (canonical rule)
+    setHuman({ ...nextHuman, board: [], total: 0, bust: false, stood: false, hasTiebreaker: false, sideDeck: nextHuman.sideDeck.map((c) => ({ ...c, used: false })) });
+    setAi({ ...nextAi, board: [], total: 0, bust: false, stood: false, hasTiebreaker: false, sideDeck: nextAi.sideDeck.map((c) => ({ ...c, used: false })) });
     setMainDeck(createMainDeck());
     setRoundNumber((value) => value + 1);
-    setIsHumanTurn(Math.random() > 0.5);
+    setIsHumanTurn(firstTurn === "human" ? true : firstTurn === "ai" ? false : Math.random() > 0.5);
     setPhase("playing");
   };
 
@@ -168,26 +205,33 @@ export function LocalPracticeGame({ username, difficulty, onExit }: LocalPractic
     let nextAi = { ...scoredAi };
 
     let summary = "Set tied.";
+    let setWinner: "human" | "ai" | "none" = "none";
 
     if (scoredHuman.bust && !scoredAi.bust) {
       nextAi.roundWins += 1;
+      setWinner = "ai";
       summary = `${ai.name} wins set ${roundNumber} (${scoredAi.total} vs bust).`;
     } else if (!scoredHuman.bust && scoredAi.bust) {
       nextHuman.roundWins += 1;
+      setWinner = "human";
       summary = `${human.name} wins set ${roundNumber} (${scoredHuman.total} vs bust).`;
     } else if (!scoredHuman.bust && !scoredAi.bust && scoredHuman.total > scoredAi.total) {
       nextHuman.roundWins += 1;
+      setWinner = "human";
       summary = `${human.name} wins set ${roundNumber} (${scoredHuman.total} to ${scoredAi.total}).`;
     } else if (!scoredHuman.bust && !scoredAi.bust && scoredAi.total > scoredHuman.total) {
       nextAi.roundWins += 1;
+      setWinner = "ai";
       summary = `${ai.name} wins set ${roundNumber} (${scoredAi.total} to ${scoredHuman.total}).`;
     } else if (!scoredHuman.bust && !scoredAi.bust && scoredHuman.total === scoredAi.total) {
       // Tiebreaker resolution: if only one player has the tiebreaker flag, they win
       if (scoredHuman.hasTiebreaker && !scoredAi.hasTiebreaker) {
         nextHuman.roundWins += 1;
+        setWinner = "human";
         summary = `${human.name} wins set ${roundNumber} with Tiebreaker (${scoredHuman.total} tied)!`;
       } else if (scoredAi.hasTiebreaker && !scoredHuman.hasTiebreaker) {
         nextAi.roundWins += 1;
+        setWinner = "ai";
         summary = `${ai.name} wins set ${roundNumber} with Tiebreaker (${scoredAi.total} tied)!`;
       }
     }
@@ -202,9 +246,19 @@ export function LocalPracticeGame({ username, difficulty, onExit }: LocalPractic
       return;
     }
 
-    setTimeout(() => {
-      resetRound(nextHuman, nextAi);
-    }, 900);
+    // Canonical rule: loser of the set goes first in the next one
+    const nextFirst: "human" | "ai" | "random" = setWinner === "human" ? "ai" : setWinner === "ai" ? "human" : "random";
+    // Show round-end overlay instead of auto-advancing — user clicks Continue
+    setSetResult({
+      summary,
+      humanTotal: scoredHuman.bust ? -1 : scoredHuman.total,
+      aiTotal: scoredAi.bust ? -1 : scoredAi.total,
+      humanWins: nextHuman.roundWins,
+      aiWins: nextAi.roundWins,
+      nextHuman,
+      nextAi,
+      nextFirst,
+    });
   };
 
   const drawFor = (target: "human" | "ai") => {
@@ -218,9 +272,15 @@ export function LocalPracticeGame({ username, difficulty, onExit }: LocalPractic
     setMainDeck(nextDeck);
 
     if (target === "human") {
-      const next = scorePlayer({ ...human, board: [...human.board, value] });
+      let next = scorePlayer({ ...human, board: [...human.board, value] });
+      const autoStand = next.total === TARGET_SCORE && !next.bust;
+      if (autoStand) {
+        next = { ...next, stood: true };
+        pushLog(`${human.name} draws ${value} — stands automatically at 20!`);
+      } else {
+        pushLog(`${human.name} draws ${value} (total ${next.total}).`);
+      }
       setHuman(next);
-      pushLog(`${human.name} draws ${value} (total ${next.total}).`);
       if (next.bust || next.board.length >= MAX_BOARD) {
         setPhase("round_end");
       } else {
@@ -229,9 +289,15 @@ export function LocalPracticeGame({ username, difficulty, onExit }: LocalPractic
       return;
     }
 
-    const next = scorePlayer({ ...ai, board: [...ai.board, value] });
+    let next = scorePlayer({ ...ai, board: [...ai.board, value] });
+    const autoStand = next.total === TARGET_SCORE && !next.bust;
+    if (autoStand) {
+      next = { ...next, stood: true };
+      pushLog(`${ai.name} draws ${value} — stands automatically at 20!`);
+    } else {
+      pushLog(`${ai.name} draws ${value} (total ${next.total}).`);
+    }
     setAi(next);
-    pushLog(`${ai.name} draws ${value} (total ${next.total}).`);
     if (next.bust || next.board.length >= MAX_BOARD) {
       setPhase("round_end");
     } else {
@@ -245,46 +311,57 @@ export function LocalPracticeGame({ username, difficulty, onExit }: LocalPractic
 
     const nextDeck = human.sideDeck.map((entry) => (entry.id === card.id ? { ...entry, used: true } : entry));
 
+    if (card.type === "flex") {
+      // Show inline polarity chooser instead of window.confirm
+      setFlexPrompt({ cardId: card.id, label: card.label, value: card.value });
+      return;
+    }
+
     if (card.type === "flip") {
-      // Flip cards invert the sign of all board values equal to card.value or its partner
       const flipValues = new Set([card.value, card.value * 2]);
       const flipped = human.board.map((v) => (flipValues.has(Math.abs(v)) ? -v : v));
-      const next = scorePlayer({ ...human, sideDeck: nextDeck, board: flipped });
+      let next = scorePlayer({ ...human, sideDeck: nextDeck, board: flipped });
+      if (next.total === TARGET_SCORE && !next.bust) next = { ...next, stood: true };
       setHuman(next);
-      pushLog(`${human.name} plays ${card.label} — board flipped (total ${next.total}).`);
-      if (next.bust || next.board.length >= MAX_BOARD) {
-        setPhase("round_end");
-      } else {
-        setIsHumanTurn(false);
-      }
+      pushLog(`${human.name} plays ${card.label} — board flipped (total ${next.total})${next.stood ? ", stands at 20!" : "."}`);
+      if (next.bust || next.board.length >= MAX_BOARD) setPhase("round_end");
+      else setIsHumanTurn(false);
       return;
     }
 
     if (card.type === "tiebreaker") {
-      // Tiebreaker: adds +1 to board and grants ability to win tied rounds
-      const next = scorePlayer({ ...human, sideDeck: nextDeck, board: [...human.board, 1], hasTiebreaker: true });
+      let next = scorePlayer({ ...human, sideDeck: nextDeck, board: [...human.board, 1], hasTiebreaker: true });
+      if (next.total === TARGET_SCORE && !next.bust) next = { ...next, stood: true };
       setHuman(next);
-      pushLog(`${human.name} plays \xb11T Tiebreaker — total ${next.total}, ties won this set.`);
-      if (next.bust || next.board.length >= MAX_BOARD) {
-        setPhase("round_end");
-      } else {
-        setIsHumanTurn(false);
-      }
+      pushLog(`${human.name} plays \xb11T Tiebreaker — total ${next.total}${next.stood ? ", stands at 20!" : ", ties won this set."}`);
+      if (next.bust || next.board.length >= MAX_BOARD) setPhase("round_end");
+      else setIsHumanTurn(false);
       return;
     }
 
-    const sign = card.type === "flex" ? (window.confirm(`Use ${card.label} as positive? Press Cancel for negative.`) ? 1 : -1) : card.type === "minus" ? -1 : 1;
+    const sign = card.type === "minus" ? -1 : 1;
     const delta = sign * card.value;
-
-    const next = scorePlayer({ ...human, sideDeck: nextDeck, board: [...human.board, delta] });
+    let next = scorePlayer({ ...human, sideDeck: nextDeck, board: [...human.board, delta] });
+    if (next.total === TARGET_SCORE && !next.bust) next = { ...next, stood: true };
     setHuman(next);
-    pushLog(`${human.name} plays ${card.label} as ${delta > 0 ? `+${delta}` : `${delta}`} (total ${next.total}).`);
+    pushLog(`${human.name} plays ${card.label} as ${delta > 0 ? `+${delta}` : `${delta}`} (total ${next.total})${next.stood ? " — stands at 20!" : "."}`);
+    if (next.bust || next.board.length >= MAX_BOARD) setPhase("round_end");
+    else setIsHumanTurn(false);
+  };
 
-    if (next.bust || next.board.length >= MAX_BOARD) {
-      setPhase("round_end");
-    } else {
-      setIsHumanTurn(false);
-    }
+  const confirmFlex = (sign: 1 | -1) => {
+    if (!flexPrompt) return;
+    const card = human.sideDeck.find((c) => c.id === flexPrompt.cardId && !c.used);
+    setFlexPrompt(null);
+    if (!card) return;
+    const nextDeck = human.sideDeck.map((c) => (c.id === card.id ? { ...c, used: true } : c));
+    const delta = sign * card.value;
+    let next = scorePlayer({ ...human, sideDeck: nextDeck, board: [...human.board, delta] });
+    if (next.total === TARGET_SCORE && !next.bust) next = { ...next, stood: true };
+    setHuman(next);
+    pushLog(`${human.name} plays ${card.label} as ${delta > 0 ? `+${delta}` : `${delta}`} (total ${next.total})${next.stood ? " — stands at 20!" : "."}`);
+    if (next.bust || next.board.length >= MAX_BOARD) setPhase("round_end");
+    else setIsHumanTurn(false);
   };
 
   const humanStand = () => {
@@ -306,18 +383,64 @@ export function LocalPracticeGame({ username, difficulty, onExit }: LocalPractic
       return;
     }
 
+    const delay = getAiDelay(difficulty);
     const timeout = window.setTimeout(() => {
       const action = nextAiAction(ai, difficulty);
       if (action === "stand") {
         setAi((previous) => ({ ...previous, stood: true }));
         pushLog(`${ai.name} stands on ${ai.total}.`);
         setIsHumanTurn(true);
-      } else {
-        drawFor("ai");
+        return;
       }
-    }, 700);
+
+      // AI draws a card
+      if (mainDeck.length === 0) {
+        setPhase("round_end");
+        return;
+      }
+      const value = mainDeck[mainDeck.length - 1]!;
+      setMainDeck((previous) => previous.slice(0, -1));
+
+      let drawnAi = scorePlayer({ ...ai, board: [...ai.board, value] });
+
+      // Auto-stand at exactly 20
+      if (drawnAi.total === TARGET_SCORE && !drawnAi.bust) {
+        drawnAi = { ...drawnAi, stood: true };
+        pushLog(`${ai.name} draws ${value} \u2014 stands automatically at 20!`);
+      } else {
+        pushLog(`${ai.name} draws ${value} (total ${drawnAi.total}).`);
+      }
+
+      // AI side-card play: bust rescue first, then exact-finish
+      if (drawnAi.bust) {
+        const rescue = aiPickRescueCard(drawnAi);
+        if (rescue) {
+          const rescuedDeck = drawnAi.sideDeck.map((c) => (c.id === rescue.id ? { ...c, used: true } : c));
+          const rescueDelta = -rescue.value;
+          drawnAi = scorePlayer({ ...drawnAi, sideDeck: rescuedDeck, board: [...drawnAi.board, rescueDelta] });
+          pushLog(`${ai.name} plays ${rescue.label} to recover (total ${drawnAi.total}).`);
+        }
+      } else if (!drawnAi.stood) {
+        const exactCard = aiPickExactCard(drawnAi);
+        if (exactCard) {
+          const exactDeck = drawnAi.sideDeck.map((c) => (c.id === exactCard.id ? { ...c, used: true } : c));
+          const exactDelta = exactCard.type === "minus" ? -exactCard.value : exactCard.value;
+          drawnAi = scorePlayer({ ...drawnAi, sideDeck: exactDeck, board: [...drawnAi.board, exactDelta] });
+          if (drawnAi.total === TARGET_SCORE && !drawnAi.bust) drawnAi = { ...drawnAi, stood: true };
+          pushLog(`${ai.name} plays ${exactCard.label} \u2014 exact finish at ${drawnAi.total}!`);
+        }
+      }
+
+      setAi(drawnAi);
+      if (drawnAi.bust || drawnAi.board.length >= MAX_BOARD) {
+        setPhase("round_end");
+      } else {
+        setIsHumanTurn(true);
+      }
+    }, delay);
 
     return () => window.clearTimeout(timeout);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ai, difficulty, human.stood, isHumanTurn, phase]);
 
   useEffect(() => {
@@ -328,6 +451,13 @@ export function LocalPracticeGame({ username, difficulty, onExit }: LocalPractic
 
   const canAct = phase === "playing" && isHumanTurn && !human.stood && !human.bust;
 
+  const continueToNextRound = () => {
+    if (!setResult) return;
+    const { nextHuman, nextAi, nextFirst } = setResult;
+    setSetResult(null);
+    resetRound(nextHuman, nextAi, nextFirst);
+  };
+
   const restartGame = () => {
     const freshHuman = createPlayer(username || "Player");
     const freshAi = createPlayer(`AI ${formatDifficulty(difficulty)}`);
@@ -337,8 +467,39 @@ export function LocalPracticeGame({ username, difficulty, onExit }: LocalPractic
     setPhase("playing");
     setIsHumanTurn(Math.random() > 0.5);
     setRoundNumber(1);
+
+        {/* Round-end overlay: shown between sets */}
+        {setResult && (
+          <div className="local-game__overlay">
+            <div className="local-game__set-result">
+              <h2>Set {roundNumber} Complete</h2>
+              <p className="local-game__set-result__summary">{setResult.summary}</p>
+              <table className="local-game__set-result__scores">
+                <tbody>
+                  <tr>
+                    <td>{human.name}</td>
+                    <td className={setResult.humanTotal < 0 ? "score--bust" : setResult.humanTotal === TARGET_SCORE ? "score--perfect" : ""}>
+                      {setResult.humanTotal < 0 ? "BUST" : setResult.humanTotal}
+                    </td>
+                    <td>{setResult.humanWins} sets</td>
+                  </tr>
+                  <tr>
+                    <td>{ai.name}</td>
+                    <td className={setResult.aiTotal < 0 ? "score--bust" : setResult.aiTotal === TARGET_SCORE ? "score--perfect" : ""}>
+                      {setResult.aiTotal < 0 ? "BUST" : setResult.aiTotal}
+                    </td>
+                    <td>{setResult.aiWins} sets</td>
+                  </tr>
+                </tbody>
+              </table>
+              <p className="local-game__set-result__series">Series: {human.name} {setResult.humanWins} – {setResult.aiWins} {ai.name}</p>
+              <button className="btn btn--primary" onClick={continueToNextRound}>Continue</button>
+            </div>
+          </div>
+        )}
     setRoundSummary("New match started.");
     setActionLog(["New match started."]);
+    setSetResult(null);
   };
 
   return (
@@ -355,25 +516,58 @@ export function LocalPracticeGame({ username, difficulty, onExit }: LocalPractic
 
         <section className="local-game__players">
           <article className="local-game__player-card">
-            <h2>{human.name} {isHumanTurn ? "(Your turn)" : ""}</h2>
-            <p>Total: {human.bust ? "BUST" : human.total} · Sets: {human.roundWins}</p>
+            <h2>{human.name} {isHumanTurn && phase === "playing" ? "(Your turn)" : ""}</h2>
+            <p>
+              Total:{" "}
+              <span className={human.bust ? "score--bust" : human.total === TARGET_SCORE ? "score--perfect" : ""}>
+                {human.bust ? "BUST" : human.total}
+              </span>
+              {" "}· Sets: {human.roundWins}
+            </p>
             <div className="local-game__board">
-              {human.board.length === 0 ? <span>No cards</span> : human.board.map((value, index) => <span key={`${value}-${index}`}>{value > 0 ? `+${value}` : `${value}`}</span>)}
+              {human.board.length === 0 ? <span>No cards</span> : human.board.map((value, index) => (
+                <span key={`${value}-${index}`} className={`board-card ${value > 0 ? "board-card--pos" : "board-card--neg"}`}>
+                  {value > 0 ? `+${value}` : `${value}`}
+                </span>
+              ))}
             </div>
             <div className="local-game__side-deck">
-              {human.sideDeck.filter((card) => !card.used).map((card) => (
-                <button key={card.id} className="btn btn--card btn--sm" onClick={() => applyHumanSideCard(card.id)} disabled={!canAct}>
-                  {card.label}
-                </button>
-              ))}
+              {flexPrompt ? (
+                <div className="local-game__flex-prompt">
+                  <span>Play {flexPrompt.label} as:</span>
+                  <button className="btn btn--primary btn--sm" onClick={() => confirmFlex(1)}>+{flexPrompt.value}</button>
+                  <button className="btn btn--secondary btn--sm" onClick={() => confirmFlex(-1)}>-{flexPrompt.value}</button>
+                </div>
+              ) : (
+                human.sideDeck.map((card) => (
+                  <button
+                    key={card.id}
+                    className={`btn btn--card btn--sm${card.used ? " btn--card--used" : ""}`}
+                    onClick={() => applyHumanSideCard(card.id)}
+                    disabled={!canAct || card.used}
+                  >
+                    {card.label}
+                  </button>
+                ))
+              )}
             </div>
           </article>
 
           <article className="local-game__player-card">
-            <h2>{ai.name}</h2>
-            <p>Total: {ai.bust ? "BUST" : ai.total} · Sets: {ai.roundWins}</p>
+            <h2>{ai.name}{!isHumanTurn && phase === "playing" ? " (thinking…)" : ""}</h2>
+            <p>
+              Total:{" "}
+              <span className={ai.bust ? "score--bust" : ai.total === TARGET_SCORE ? "score--perfect" : ""}>
+                {ai.bust ? "BUST" : ai.total}
+              </span>
+              {" "}· Sets: {ai.roundWins}
+            </p>
             <div className="local-game__board">
-              {ai.board.length === 0 ? <span>No cards</span> : ai.board.map((value, index) => <span key={`${value}-${index}`}>{value > 0 ? `+${value}` : `${value}`}</span>)}
+              {ai.board.length === 0 ? <span>No cards</span> : ai.board.map((value, index) => (
+                <span key={`${value}-${index}`} className={`board-card ${value > 0 ? "board-card--pos" : "board-card--neg"}`}>
+                  {value > 0 ? `+${value}` : `${value}`}
+                </span>
+              ))}
             </div>
           </article>
         </section>
