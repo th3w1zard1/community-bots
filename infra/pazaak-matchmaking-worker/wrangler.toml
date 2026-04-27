@@ -1,0 +1,16 @@
+name = "pazaak-matchmaking"
+main = "src/index.ts"
+compatibility_date = "2026-04-27"
+workers_dev = true
+
+[vars]
+SERVICE_NAME = "Pazaak Matchmaking Fallback"
+
+[durable_objects]
+bindings = [
+  { name = "COORDINATOR", class_name = "MatchCoordinator" }
+]
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["MatchCoordinator"]

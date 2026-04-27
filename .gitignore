@@ -1,4 +1,7 @@
 .*/
+!.github/
+!.github/workflows/
+!.github/workflows/*.yml
 .env
 .env.local
 .history/

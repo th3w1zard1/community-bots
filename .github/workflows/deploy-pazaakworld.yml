@@ -1,0 +1,80 @@
+name: Deploy PazaakWorld to GitHub Pages
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "apps/pazaak-world/**"
+      - "packages/**"
+      - "pnpm-lock.yaml"
+      - "pnpm-workspace.yaml"
+      - ".github/workflows/deploy-pazaakworld.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pazaak-world-pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      base_path: ${{ steps.base.outputs.base_path }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.11.0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Resolve Pages base path
+        id: base
+        shell: bash
+        run: |
+          if [ "${GITHUB_REPOSITORY#*/}" = "${GITHUB_REPOSITORY_OWNER}.github.io" ]; then
+            echo "base_path=/" >> "$GITHUB_OUTPUT"
+          else
+            echo "base_path=/${GITHUB_REPOSITORY#*/}/" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build PazaakWorld
+        env:
+          BASE: ${{ steps.base.outputs.base_path }}
+          VITE_API_BASES: ${{ vars.PAZAAK_API_BASES }}
+        run: pnpm --filter pazaak-world build
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: apps/pazaak-world/dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

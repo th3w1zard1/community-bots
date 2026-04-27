@@ -70,6 +70,49 @@ export interface SocialAuthStartResponse {
 // HTTP helpers
 // ---------------------------------------------------------------------------
 
+const configuredApiBases = String(import.meta.env.VITE_API_BASES ?? "")
+  .split(",")
+  .map((value: string) => value.trim())
+  .filter((value: string) => value.length > 0);
+
+const apiBases = configuredApiBases.length > 0 ? configuredApiBases : [""];
+
+function buildApiUrl(path: string, base: string): string {
+  if (!base) return path;
+  const normalizedBase = base.endsWith("/") ? base.slice(0, -1) : base;
+  const normalizedPath = path.startsWith("/") ? path : `/${path}`;
+  return `${normalizedBase}${normalizedPath}`;
+}
+
+async function fetchApiWithFailover(path: string, init?: RequestInit): Promise<Response> {
+  let lastResponse: Response | null = null;
+  let lastError: unknown;
+
+  for (const base of apiBases) {
+    const url = buildApiUrl(path, base);
+    try {
+      const response = await fetch(url, init);
+      if (response.status >= 500 && response.status <= 599) {
+        lastResponse = response;
+        continue;
+      }
+      return response;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  if (lastResponse) {
+    return lastResponse;
+  }
+
+  if (lastError instanceof Error) {
+    throw lastError;
+  }
+
+  throw new Error(`Failed to reach API for ${path}`);
+}
+
 async function parseJsonBodySafe<T>(res: Response): Promise<T | null> {
   const text = await res.text();
   if (!text.trim()) {
@@ -88,7 +131,7 @@ async function apiFetch<T>(
   accessToken: string,
   init?: RequestInit,
 ): Promise<T> {
-  const res = await fetch(path, {
+  const res = await fetchApiWithFailover(path, {
     ...init,
     headers: {
       "Content-Type": "application/json",
@@ -182,7 +225,7 @@ export async function registerAccount(input: {
   email?: string;
   password: string;
 }): Promise<AuthSessionResponse> {
-  const res = await fetch("/api/auth/register", {
+  const res = await fetchApiWithFailover("/api/auth/register", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(input),
@@ -194,7 +237,7 @@ export async function registerAccount(input: {
 }
 
 export async function loginAccount(identifier: string, password: string): Promise<AuthSessionResponse> {
-  const res = await fetch("/api/auth/login", {
+  const res = await fetchApiWithFailover("/api/auth/login", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ identifier, password }),
@@ -206,7 +249,7 @@ export async function loginAccount(identifier: string, password: string): Promis
 }
 
 export async function fetchSocialAuthProviders(): Promise<SocialAuthProviderListResponse> {
-  const res = await fetch("/api/auth/oauth/providers");
+  const res = await fetchApiWithFailover("/api/auth/oauth/providers");
   const body = await parseJsonBodySafe<SocialAuthProviderListResponse | { error?: string }>(res);
   if (!res.ok) throw new Error(body && typeof (body as { error?: string }).error === "string" ? (body as { error?: string }).error as string : `HTTP ${res.status}`);
   if (!body) {
@@ -222,7 +265,7 @@ export async function fetchSocialAuthProviders(): Promise<SocialAuthProviderList
 }
 
 export async function startSocialAuth(provider: SocialAuthProvider): Promise<SocialAuthStartResponse> {
-  const res = await fetch(`/api/auth/oauth/${encodeURIComponent(provider)}/start`, {
+  const res = await fetchApiWithFailover(`/api/auth/oauth/${encodeURIComponent(provider)}/start`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
   });
@@ -270,9 +313,10 @@ export async function fetchHistory(accessToken: string, limit = 25): Promise<Paz
 }
 
 export async function fetchPazaakOpponents(): Promise<PazaakOpponentProfileRecord[]> {
-  const res = await fetch("/api/pazaak/opponents");
-  const body = await res.json() as OpponentsResponse | { error?: string };
-  if (!res.ok) throw new Error((body as { error?: string }).error ?? `HTTP ${res.status}`);
+  const res = await fetchApiWithFailover("/api/pazaak/opponents");
+  const body = await parseJsonBodySafe<OpponentsResponse | { error?: string }>(res);
+  if (!res.ok) throw new Error(body && typeof (body as { error?: string }).error === "string" ? (body as { error?: string }).error as string : `HTTP ${res.status}`);
+  if (!body) return [];
   return (body as OpponentsResponse).opponents;
 }
 

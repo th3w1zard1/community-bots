@@ -802,6 +802,11 @@ export function LocalPracticeGame({ username, difficulty, opponentId, onExit }: 
       setAi(drawnAi);
       if (drawnAi.bust || drawnAi.board.length >= MAX_BOARD) {
         setPhase("round_end");
+      } else if (human.stood && !drawnAi.stood) {
+        // If the player has already stood, the AI keeps taking turns until it stands or busts.
+        setIsHumanTurn(false);
+        setTurnStage("draw");
+        setSideCardPlayedThisTurn(false);
       } else {
         setIsHumanTurn(true);
         setTurnStage("draw");
