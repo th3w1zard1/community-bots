@@ -13,6 +13,7 @@
     "check:pazaak-oauth": "node scripts/check_pazaak_oauth_readiness.mjs",
     "dev:trask": "pnpm --filter @openkotor/trask-bot dev",
     "dev:trask-http": "pnpm --filter @openkotor/trask-http-server dev",
+    "dev:holocron-web": "pnpm --filter @openkotor/holocron-web dev",
     "dev:hk": "pnpm --filter @openkotor/hk-bot dev",
     "dev:hk86-web": "pnpm --filter hk86-web dev",
     "test:hk86-web": "pnpm --filter hk86-web test:e2e",
@@ -24,7 +25,7 @@
     "discord:install-links": "tsx scripts/discord-install-links.ts",
     "smoke:trask-gptr-dry": "python scripts/smoke_trask_headless_gptr.py --dry-run",
     "smoke:trask-gptr": "python scripts/smoke_trask_headless_gptr.py",
-    "holocron:e2e": "pnpm --filter spark-template build && pnpm exec playwright test -c vendor/qa-webui/playwright.config.ts",
+    "holocron:e2e": "pnpm --filter @openkotor/holocron-web build",
     "discord:smoke-trask-commands": "node scripts/discord_trask_commands_smoke.mjs"
   },
   "devDependencies": {

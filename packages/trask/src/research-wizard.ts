@@ -77,6 +77,64 @@ const extractUrls = (value: string): string[] => {
   return [...new Set(matches.map((match) => match.replace(/[.,;:!?]+$/, "")))];
 };
 
+const hostnameHint = (url: string): string => {
+  try {
+    return new URL(url).hostname.replace(/^www\./, "").toLowerCase();
+  } catch {
+    return url.slice(0, 48);
+  }
+};
+
+/** Dedupe by normalized URL; preserves first-seen order for stable Holocron pulses. */
+const uniqueUrlsPreserveOrder = (urls: readonly string[]): string[] => {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const raw of urls) {
+    const u = normalizeUrl(raw);
+    if (!u || seen.has(u)) continue;
+    seen.add(u);
+    out.push(u);
+  }
+  return out;
+};
+
+/** Visited / cited URLs from GPT Researcher payload (Holocron live facet pings). */
+const collectVisitedUrlsFromPayload = (payload: ResearchWizardResponsePayload): string[] => {
+  const info = payload.research_information;
+  const rawVisited =
+    (Array.isArray(info?.visited_urls) ? info.visited_urls : []).filter(
+      (value): value is string => typeof value === "string",
+    );
+  const rawSources =
+    (Array.isArray(info?.source_urls) ? info.source_urls : []).filter((value): value is string => typeof value === "string");
+  return uniqueUrlsPreserveOrder([...rawVisited, ...rawSources]);
+};
+
+const MAX_ARCHIVE_PROBE_EVENTS = 28;
+
+const emitArchiveProbeEvents = (
+  payload: ResearchWizardResponsePayload,
+  approvedSources: readonly SourceDescriptor[],
+  onProgress?: (event: ResearchWizardProgressEvent) => void,
+): void => {
+  if (!onProgress) return;
+
+  const urls = collectVisitedUrlsFromPayload(payload).slice(0, MAX_ARCHIVE_PROBE_EVENTS * 2);
+
+  let emitted = 0;
+  for (const url of urls) {
+    if (emitted >= MAX_ARCHIVE_PROBE_EVENTS) break;
+    const matched = matchApprovedSource(url, approvedSources);
+    const host = hostnameHint(url);
+    onProgress({
+      phase: "gather",
+      detail: matched ? `Facet · ${matched.name}` : `Touch · ${host}`,
+      ...(matched ? { sources: [matched] } : {}),
+    });
+    emitted++;
+  }
+};
+
 const matchApprovedSource = (
   url: string,
   approvedSources: readonly SourceDescriptor[],
@@ -409,6 +467,7 @@ export class ResearchWizardClient implements ResearchWizardQueryHandler {
       detail: "Scanning approved archives and open-web context…",
     });
     const { report, payload } = await this.fetchResearchReport(query, buildCustomPrompt());
+    emitArchiveProbeEvents(payload, this.approvedSources, onProgress);
     onProgress?.({
       phase: "report",
       detail: "Ranking passages and citations…",

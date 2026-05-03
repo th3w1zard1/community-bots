@@ -196,7 +196,7 @@ export interface TraskBotConfig {
   /** Directory for `trask-queries.json` (shared with Holocron when using the embedded web UI). */
   queryDataDir: string;
   /**
-   * When set, serves `vendor/qa-webui/dist` and `/api/trask/*` on this port (same process as the bot).
+   * When set, serves `apps/holocron-web/dist` and `/api/trask/*` on this port (same process as the bot).
    * Use Discord OAuth + `TRASK_SESSION_SECRET` so browser sessions map to Discord user ids.
    */
   webPort: number | undefined;
@@ -392,7 +392,7 @@ export interface TraskHttpServerConfig {
   /** User id bucket for anonymous or API-key sessions in `JsonTraskQueryRepository`. */
   webDefaultUserId: string;
   chunkDir: string;
-  /** Browser origin for CORS (e.g. qa-webui dev server). */
+  /** Browser origin for CORS (e.g. Holocron Vite dev server). */
   publicWebOrigin: string | undefined;
 }
 

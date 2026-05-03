@@ -156,7 +156,7 @@ pnpm wrappers (repo root): **`pnpm smoke:trask-gptr-dry`** and **`pnpm smoke:tra
 
 ### Holocron browser E2E (Playwright)
 
-End-to-end UI checks run against **built** `vendor/qa-webui` served by **`trask-http-server`** on **4010**
+End-to-end UI checks run against **built** `apps/holocron-web` served by **`trask-http-server`** on **4010**
 (the same integrated layout as production Holocron behind the API).
 
 ```bash
@@ -236,18 +236,18 @@ may not bind** the option—rather than pasting a full pseudo-command string.
 | `@openkotor/trask` | Spawns `trask_headless_research.py` (GPT Researcher); optional OpenAI-compatible rewrite pass |
 | `@openkotor/trask-http` | Express router factory: `GET/POST /sources`, `/history`, `/ask` under `/api/trask` with pluggable auth |
 | `apps/trask-bot` | Discord slash commands; optional proactive listener uses `@openkotor/trask` brief answers + LLM gates |
-| `apps/trask-http-server` | Standalone API + optional static serving of `vendor/qa-webui/dist` |
+| `apps/trask-http-server` | Standalone API + optional static serving of `apps/holocron-web/dist` |
 | `apps/pazaak-bot` | Still mounts the same router at `/api/trask` for PazaakWorld |
-| `vendor/qa-webui` | Holocron SPA; **default** path calls the Trask HTTP API (legacy Spark simulation behind `VITE_TRASK_LEGACY_SPARK=1`) |
+| `apps/holocron-web` | Holocron SPA; **default** path calls the Trask HTTP API (legacy Spark simulation behind `VITE_TRASK_LEGACY_SPARK=1`) |
 | `vendor/ai-researchwizard` | Upstream GPT Researcher tree; Trask uses `trask_headless_research.py` (+ optional `cli.py` for humans) |
 | `vendor/llm_fallbacks` | Python ordering for free/chat models; optional helper script for GPTR env |
 
-Trask Q&A does **not** require PazaakWorld: run `trask-http-server` + `qa-webui` against the same headless GPT Researcher
+Trask Q&A does **not** require PazaakWorld: run `trask-http-server` + `holocron-web` against the same headless GPT Researcher
 install on disk (`TRASK_GPT_RESEARCHER_ROOT`).
 
 ## Standalone HTTP server (`apps/trask-http-server`)
 
-Runs the shared router and optionally serves a built `vendor/qa-webui` bundle.
+Runs the shared router and optionally serves a built `apps/holocron-web` bundle.
 
 ```bash
 pnpm dev:trask-http
@@ -260,22 +260,23 @@ See [`apps/trask-http-server/.env.example`](apps/trask-http-server/.env.example)
 | Mode | Configuration |
 |---|---|
 | Local dev | `TRASK_WEB_ALLOW_ANONYMOUS=1` — requests are scoped to `TRASK_WEB_DEFAULT_USER_ID` |
-| Shared secret | `TRASK_WEB_API_KEY` — send `Authorization: Bearer <key>` or `X-Trask-Api-Key` (qa-webui can store a key in Settings) |
+| Shared secret | `TRASK_WEB_API_KEY` — send `Authorization: Bearer <key>` or `X-Trask-Api-Key` (Holocron web can store a key in Settings) |
 
 ### Shared history with Discord
 
 Point both processes at the same JSON store: set **`TRASK_HTTP_DATA_DIR`** on `trask-http-server` and use the same directory + filename pattern (`trask-queries.json` via `resolveDataFile`) if you extend the bot to POST to the API later—or symlink/copy **one** `trask-queries.json` path in ops.
 
-## Holocron Web UI (`vendor/qa-webui`)
+## Holocron Web UI (`apps/holocron-web`)
 
 - **Default:** questions go to `/api/trask/ask` (relative URL). Vite dev proxies `/api/trask` → `TRASK_HTTP_PROXY_TARGET` (default `http://127.0.0.1:4010`).
 - **Env:** `VITE_TRASK_API_BASE` (optional absolute API origin), `VITE_TRASK_API_KEY` (optional build-time bearer), `VITE_TRASK_LEGACY_SPARK=1` to restore the old Spark + simulated multi-agent path.
 
 ```bash
-`pnpm install` at the **monorepo root** (includes `vendor/qa-webui`), then `pnpm --filter spark-template build`
+pnpm install   # monorepo root
+pnpm dev:holocron-web   # or: pnpm --filter @openkotor/holocron-web dev
 ```
 
-Then either open the app via `trask-http-server` (static) or run `pnpm dev` with `trask-http-server` on port 4010.
+Then either open the app via `trask-http-server` (static, after `pnpm --filter @openkotor/holocron-web build`) or run the dev server with `trask-http-server` on port 4010.
 
 ## Web UI (PazaakWorld, optional)
 

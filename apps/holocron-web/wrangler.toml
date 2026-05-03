@@ -1,0 +1,7 @@
+# Holocron web — Cloudflare Pages. Build: pnpm build (from apps/holocron-web).
+# Deploy: npx wrangler pages deploy dist --project-name=holocron
+# Fallback: copy dist/ to GitHub Pages (e.g. openkotor.github.io/bots/holocron) and set TRASK_HOLOCRON_PUBLIC_URL.
+
+name = "holocron"
+compatibility_date = "2025-04-01"
+pages_build_output_dir = "dist"

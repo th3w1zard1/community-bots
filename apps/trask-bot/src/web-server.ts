@@ -215,7 +215,7 @@ export const startEmbeddedTraskWebUi = (
   );
 
   const distFromEnv = process.env.TRASK_WEBUI_DIST_PATH?.trim();
-  const defaultDist = path.join(repoRoot, "vendor", "qa-webui", "dist");
+  const defaultDist = path.join(repoRoot, "apps", "holocron-web", "dist");
   const webUiDist = distFromEnv ? path.resolve(distFromEnv) : defaultDist;
 
   if (existsSync(webUiDist)) {
@@ -225,9 +225,9 @@ export const startEmbeddedTraskWebUi = (
       if (req.path.startsWith("/api")) return next();
       res.sendFile(path.join(webUiDist, "index.html"));
     });
-    logger.info(`Serving Holocron (qa-webui) from ${webUiDist}`);
+    logger.info(`Serving Holocron web UI from ${webUiDist}`);
   } else {
-    logger.warn(`qa-webui dist not found at ${webUiDist}; API only. Set TRASK_WEBUI_DIST_PATH or build vendor/qa-webui.`);
+    logger.warn(`Holocron web dist not found at ${webUiDist}; API only. Set TRASK_WEBUI_DIST_PATH or build apps/holocron-web.`);
   }
 
   const { server, listen } = createNodeApiHost({
