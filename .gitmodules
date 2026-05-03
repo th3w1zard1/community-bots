@@ -6,7 +6,7 @@
 	url = https://github.com/bolabaden/llm_fallbacks.git
 [submodule "vendor/PazaakWorld"]
 	path = vendor/PazaakWorld
-	url = C:/GitHub/PazaakWorld
+	url = https://github.com/th3w1zard1/PazaakWorld.git
 [submodule "vendor/HoloPazaak"]
 	path = vendor/HoloPazaak
 	url = https://github.com/OpenKotOR/HoloPazaak
