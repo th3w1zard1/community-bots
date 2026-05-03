@@ -73,6 +73,12 @@ jobs:
         env:
           BASE: ${{ steps.base.outputs.base_path }}
           VITE_API_BASES: ${{ steps.api.outputs.api_bases }}
+          VITE_REPO_BASE_URL: https://github.com/${{ github.repository }}
+          VITE_WIKI_BASE_URL: ${{ vars.WIKI_BASE_URL }}
+          VITE_TRASK_DISCORD_APPLICATION_ID: ${{ vars.TRASK_DISCORD_APP_ID }}
+          VITE_HK_DISCORD_APPLICATION_ID: ${{ vars.HK86_DISCORD_APP_ID }}
+          VITE_DISCORD_APPLICATION_ID: ${{ vars.HK86_DISCORD_APP_ID }}
+          VITE_PAZAAK_DISCORD_APPLICATION_ID: ${{ vars.PAZAAK_DISCORD_APP_ID }}
         run: pnpm --filter pazaak-world build
 
       - name: Build QA Trask WebUI

@@ -26,7 +26,8 @@ pnpm --filter @openkotor/pazaak-bot dev
 
 ## Routes and Operator Console
 
-- `/bots` and `/community-bots` render the OpenKOTOR Bots operator console.
+- `/bots` renders the public Discord bots hub (invites, docs, Web UI links).
+- `/community-bots` renders the OpenKOTOR Bots operator console (API probes, runbooks).
 - `/bots/pazaakworld` renders the PazaakWorld game surface.
 - The operator console can probe API targets, build `VITE_API_BASES`, copy endpoint snippets,
   export an OpenAPI-style sketch, filter bot surfaces, track readiness checks, and show setup or

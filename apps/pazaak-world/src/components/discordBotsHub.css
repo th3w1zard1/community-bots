@@ -1,0 +1,233 @@
+/* Static Discord bots landing — matches Pages hub aesthetic (dark navy + orange accent). */
+.discord-bots-hub {
+  --hub-bg: #1a1c23;
+  --hub-panel: #22252e;
+  --hub-border: #3a3f4d;
+  --hub-text: #f0f2f7;
+  --hub-muted: #9aa3b5;
+  --hub-accent: #f28c33;
+  --hub-accent-hover: #ff9d4d;
+  --hub-warn-bg: #2a241c;
+  --hub-warn-border: #6b4e2e;
+  --hub-primary-text: #0d0d0f;
+
+  color-scheme: dark;
+  font-family:
+    "Segoe UI",
+    system-ui,
+    sans-serif;
+  line-height: 1.5;
+  color: var(--hub-text);
+  background: var(--hub-bg);
+  min-height: 100vh;
+}
+
+.discord-bots-hub *,
+.discord-bots-hub *::before,
+.discord-bots-hub *::after {
+  box-sizing: border-box;
+}
+
+.discord-bots-hub__wrap {
+  max-width: 42rem;
+  margin: 0 auto;
+  padding: 2.25rem 1.25rem 3rem;
+}
+
+.discord-bots-hub__hero {
+  margin-bottom: 2rem;
+}
+
+.discord-bots-hub__eyebrow {
+  margin: 0 0 0.35rem;
+  font-size: 0.72rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--hub-muted);
+}
+
+.discord-bots-hub__title {
+  margin: 0 0 0.5rem;
+  font-size: clamp(1.85rem, 4.5vw, 2.45rem);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.discord-bots-hub__lede {
+  margin: 0;
+  max-width: 38rem;
+  color: var(--hub-muted);
+  font-size: 1rem;
+}
+
+.discord-bots-hub__grid {
+  display: flex;
+  flex-direction: column;
+  gap: 1.15rem;
+}
+
+.discord-bots-hub__card {
+  background: var(--hub-panel);
+  border: 1px solid var(--hub-border);
+  border-radius: 12px;
+  padding: 1.35rem 1.4rem;
+}
+
+.discord-bots-hub__card h2 {
+  margin: 0 0 0.35rem;
+  font-size: 1.35rem;
+  font-weight: 700;
+}
+
+.discord-bots-hub__tagline {
+  margin: 0;
+  color: var(--hub-muted);
+  font-size: 0.94rem;
+}
+
+.discord-bots-hub__tagline code {
+  font-size: 0.88em;
+}
+
+.discord-bots-hub__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 0.65rem;
+  margin: 1.05rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.discord-bots-hub__actions li {
+  margin: 0;
+}
+
+.discord-bots-hub__btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.55rem 1.05rem;
+  border-radius: 8px;
+  font-weight: 600;
+  font-size: 0.92rem;
+  text-decoration: none;
+  border: 1px solid transparent;
+  transition:
+    background 0.15s ease,
+    border-color 0.15s ease,
+    filter 0.15s ease;
+}
+
+.discord-bots-hub__btn--primary {
+  background: var(--hub-accent);
+  color: var(--hub-primary-text);
+  border-color: var(--hub-accent);
+}
+
+.discord-bots-hub__btn--primary:hover {
+  filter: brightness(1.08);
+}
+
+.discord-bots-hub__btn--ghost {
+  background: transparent;
+  color: var(--hub-accent);
+  border-color: var(--hub-accent);
+}
+
+.discord-bots-hub__btn--ghost:hover {
+  background: rgba(242, 140, 51, 0.1);
+  border-color: var(--hub-accent-hover);
+  color: var(--hub-accent-hover);
+}
+
+.discord-bots-hub__btn--disabled {
+  opacity: 0.45;
+  pointer-events: none;
+  cursor: not-allowed;
+}
+
+.discord-bots-hub__extra {
+  margin: 0.65rem 0 0;
+  font-size: 0.88rem;
+}
+
+.discord-bots-hub__text-link {
+  color: var(--hub-accent);
+  text-decoration: none;
+}
+
+.discord-bots-hub__text-link:hover {
+  text-decoration: underline;
+}
+
+.discord-bots-hub__callout {
+  margin: 0.75rem 0 0;
+  padding: 0.65rem 0.85rem;
+  border-radius: 8px;
+  font-size: 0.86rem;
+  background: var(--hub-warn-bg);
+  border: 1px solid var(--hub-warn-border);
+  color: #e9d5c4;
+}
+
+.discord-bots-hub__callout code {
+  font-size: 0.88em;
+}
+
+.discord-bots-hub__perms {
+  margin: 0.65rem 0 0;
+  font-size: 0.8rem;
+  color: var(--hub-muted);
+}
+
+.discord-bots-hub__perms code {
+  font-size: 0.92em;
+}
+
+.discord-bots-hub__note {
+  margin: 0.45rem 0 0;
+  font-size: 0.78rem;
+  color: var(--hub-muted);
+}
+
+.discord-bots-hub__details {
+  margin-top: 1rem;
+  padding-top: 0.85rem;
+  border-top: 1px solid var(--hub-border);
+  color: var(--hub-muted);
+  font-size: 0.88rem;
+}
+
+.discord-bots-hub__details summary {
+  cursor: pointer;
+  font-weight: 600;
+  color: var(--hub-text);
+}
+
+.discord-bots-hub__steps {
+  margin: 0.65rem 0 0;
+  padding-left: 1.25rem;
+}
+
+.discord-bots-hub__steps code {
+  font-size: 0.88em;
+}
+
+.discord-bots-hub__foot {
+  margin-top: 2rem;
+  font-size: 0.8rem;
+  color: var(--hub-muted);
+}
+
+.discord-bots-hub__foot code {
+  font-size: 0.95em;
+}
+
+.discord-bots-hub__console-link {
+  margin-top: 0.75rem;
+  font-size: 0.82rem;
+}
+
+.discord-bots-hub__console-link a {
+  color: var(--hub-accent);
+}

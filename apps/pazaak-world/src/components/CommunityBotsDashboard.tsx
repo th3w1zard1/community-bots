@@ -185,8 +185,11 @@ const DASHBOARD_CHECKLIST_KEY = "openkotor-bots-dashboard-checklist-v1";
 const STANDALONE_AUTH_TOKEN_KEY = "pazaak-world-standalone-auth-token-v1";
 const TRASK_VOTER_HANDLE_KEY = "openkotor-trask-voter-handle-v1";
 const TRASK_VOTES_KEY = "openkotor-trask-votes-v1";
-const BOTS_PUBLIC_ROUTE = "/bots";
+/** Operator console (API probes, runbooks). Public Discord invite hub lives at `/bots`. */
+const OPERATOR_CONSOLE_ROUTE = "/community-bots";
 const PAZAAK_WORLD_PUBLIC_ROUTE = "/bots/pazaakworld";
+/** Same-origin path to the static Discord bots landing (`App` switches on `/bots`). */
+const discordBotsHubPath = import.meta.env.BASE.replace(/\/$/, "") || "/bots";
 const PAZAAK_WORLD_PUBLIC_URL = "https://openkotor.github.io/bots/pazaakworld";
 const QA_TRASK_WEBUI_PUBLIC_ROUTE = "/bots/qa-webui/";
 const QA_TRASK_WEBUI_PUBLIC_URL = "https://openkotor.github.io/bots/qa-webui/";
@@ -369,7 +372,7 @@ const DASHBOARD_ENDPOINT_GROUPS: DashboardEndpointGroup[] = [
 
 const DASHBOARD_METRICS = [
   { label: "Repository", value: "OpenKotOR/bots", detail: "Renamed GitHub project" },
-  { label: "Pages base", value: "/bots/", detail: "Dashboard base route" },
+  { label: "Pages base", value: "/bots/", detail: "GitHub Pages mount (hub + nested routes)" },
   { label: "Pazaak route", value: "/bots/pazaakworld", detail: "Dedicated game route" },
   { label: "API port", value: "4001", detail: "Embedded matchmaking server" },
   { label: "Worker mode", value: "Fallback", detail: "Auth, queues, lobbies" },
@@ -397,7 +400,7 @@ const DASHBOARD_RUNBOOKS: DashboardRunbook[] = [
       "Copy .env.example to .env and fill Discord app id, bot token, guild id, and client secret.",
       "Keep PAZAAK_ACTIVITY_URL and PAZAAK_PUBLIC_WEB_ORIGIN pointed at https://openkotor.github.io/bots/pazaakworld for production-style callbacks.",
       "Start the Pazaak bot process first; it owns the embedded HTTP and WebSocket server on port 4001.",
-      "Start the Vite frontend and open /bots or /community-bots for this console, or /bots/pazaakworld for the game.",
+      "Start the Vite frontend and open /community-bots for this operator console, /bots for the Discord invite hub, or /bots/pazaakworld for the game.",
     ],
     commands: [
       { label: "Install", command: "corepack pnpm install --frozen-lockfile", detail: "Use after clone or lockfile changes." },
@@ -420,7 +423,7 @@ const DASHBOARD_RUNBOOKS: DashboardRunbook[] = [
       "Use the Deploy PazaakWorld workflow; it pins Vite BASE to /bots/ and creates a 404.html SPA fallback.",
       "Register https://openkotor.github.io/bots/pazaakworld as the public Activity/browser route.",
       "Register provider callbacks at https://openkotor.github.io/bots/pazaakworld/api/auth/oauth/<provider>/callback unless a deployed API origin requires a provider-specific callback.",
-      "Set the repository homepage to https://openkotor.github.io/bots/pazaakworld and keep /community-bots as a compatibility dashboard route.",
+      "Set the repository homepage to https://openkotor.github.io/bots/pazaakworld; /bots is the public Discord hub and /community-bots keeps this operator console.",
     ],
     commands: [
       { label: "Frontend build", command: "corepack pnpm --filter pazaak-world build", detail: "Builds the Pages artifact." },
@@ -428,7 +431,7 @@ const DASHBOARD_RUNBOOKS: DashboardRunbook[] = [
       { label: "Repo verify", command: "gh repo view OpenKotOR/bots --json nameWithOwner,url,homepageUrl", detail: "Confirms rename and homepage." },
     ],
     checks: [
-      "/bots and /community-bots show this console.",
+      "/community-bots shows this operator console; /bots is the public Discord bots landing.",
       "/bots/pazaakworld shows PazaakWorld, including direct reloads through 404.html.",
       "OAuth callback URLs do not point at localhost in production env files.",
       "Repository variable PAZAAK_API_BASES contains deployed API origins when using remote APIs.",
@@ -490,7 +493,7 @@ const DASHBOARD_SOLUTIONS: DashboardSolution[] = [
 ];
 
 const DASHBOARD_CHECKLIST: DashboardChecklistItem[] = [
-  { id: "routes", label: "Routes verified", detail: "/bots and /community-bots show this console; /bots/pazaakworld shows the game." },
+  { id: "routes", label: "Routes verified", detail: "/bots is the Discord hub; /community-bots is this console; /bots/pazaakworld shows the game." },
   { id: "api", label: "API probe passes", detail: "The selected target responds to /api/ping or /api/health." },
   { id: "oauth", label: "OAuth callbacks aligned", detail: "Provider callbacks target the public Pages PazaakWorld URL or the intended API origin." },
   { id: "worker", label: "Fallback decided", detail: "Worker fallback is either deployed and in PAZAAK_API_BASES, or intentionally unused." },
@@ -1528,11 +1531,12 @@ export function CommunityBotsDashboard() {
           <span aria-hidden="true">OK</span>
           <div>
             <strong>OpenKOTOR Bots</strong>
-            <small>{BOTS_PUBLIC_ROUTE} operator console</small>
+            <small>{OPERATOR_CONSOLE_ROUTE} operator console</small>
           </div>
         </div>
         <nav className="bots-dashboard-nav" aria-label="Bot site routes">
-          <a href={BOTS_PUBLIC_ROUTE}>Dashboard</a>
+          <a href={discordBotsHubPath}>Discord bots</a>
+          <a href={OPERATOR_CONSOLE_ROUTE}>Operator console</a>
           <a href={PAZAAK_WORLD_PUBLIC_ROUTE}>PazaakWorld</a>
           <a href={QA_TRASK_WEBUI_PUBLIC_ROUTE}>Trask WebUI</a>
           <a href="https://github.com/OpenKotOR/bots">GitHub</a>
@@ -1571,7 +1575,7 @@ export function CommunityBotsDashboard() {
           <article>
             <span>Frontend route</span>
             <strong>{window.location.pathname}</strong>
-            <small>The deployed console stays at /bots; /bots/pazaakworld opens the game surface.</small>
+            <small>The deployed operator console stays at /community-bots; /bots is the invite hub; /bots/pazaakworld opens the game surface.</small>
           </article>
           <article>
             <span>Selected API</span>

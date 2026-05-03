@@ -68,6 +68,7 @@ import { QuickSideboardSwitcher } from "./components/QuickSideboardSwitcher.tsx"
 import { SideboardWorkshop } from "./components/SideboardWorkshop.tsx";
 import { GlobalAccountCorner } from "./components/GlobalAccountCorner.tsx";
 import { CommunityBotsDashboard } from "./components/CommunityBotsDashboard.tsx";
+import { DiscordBotsHub } from "./components/DiscordBotsHub.tsx";
 import { TraskScreen } from "./components/TraskScreen.tsx";
 import { TournamentHub } from "./components/TournamentHub.tsx";
 import { HowToPlayPanel } from "./components/HowToPlayPanel.tsx";
@@ -400,21 +401,35 @@ const maybeBootstrapNakama = async (session: ActivitySession): Promise<ActivityS
 };
 
 const PAZAAK_WORLD_PUBLIC_ROUTE = "/bots/pazaakworld";
+const DISCORD_BOTS_HUB_ROUTE = "/bots";
+
+const normalizePathname = (): string => window.location.pathname.replace(/\/+$/u, "") || "/";
 
 const isPazaakWorldRoute = (): boolean => {
   if (isDiscordActivity()) {
     return true;
   }
 
-  const pathname = window.location.pathname.replace(/\/+$/u, "") || "/";
+  const pathname = normalizePathname();
   return pathname === PAZAAK_WORLD_PUBLIC_ROUTE
     || pathname.startsWith(`${PAZAAK_WORLD_PUBLIC_ROUTE}/`)
     || pathname === "/pazaakworld"
     || pathname.startsWith("/pazaakworld/");
 };
 
+const isDiscordBotsHubRoute = (): boolean => {
+  const pathname = normalizePathname();
+  return pathname === DISCORD_BOTS_HUB_ROUTE || pathname === `${DISCORD_BOTS_HUB_ROUTE}/`;
+};
+
 export default function App() {
-  return isPazaakWorldRoute() ? <PazaakWorldApp /> : <CommunityBotsDashboard />;
+  if (isPazaakWorldRoute()) {
+    return <PazaakWorldApp />;
+  }
+  if (isDiscordBotsHubRoute()) {
+    return <DiscordBotsHub />;
+  }
+  return <CommunityBotsDashboard />;
 }
 
 // ---------------------------------------------------------------------------
