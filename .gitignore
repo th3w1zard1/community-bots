@@ -148,6 +148,9 @@ vite.config.ts.timestamp-*
 !.github/workflows/*.yml
 .env
 .env.local
+# Optional local clone for vendor parity work (upstream URL varies; not part of CI submodules).
+vendor/PazaakWorld/
+
 infra/matchmaking-inducer/matchmaking-ci.env
 .history/
 *.log
