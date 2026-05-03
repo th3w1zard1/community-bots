@@ -18,15 +18,15 @@ Purpose: guild-first KOTOR q&a and troubleshooting.
 
 Commands: `/ask`, `/sources`, `/queue-reindex`.
 
-Current implementation: `/ask` forwards the user query to an `ai-researchwizard`
-sidecar via HTTP, pins the request to this repo's hardcoded approved source list, and
-renders the returned report into a Discord-native briefing with inline numeric citations
-plus a compact `Sources` block. `/sources` remains as an admin-facing policy inspection
-command. `/queue-reindex` remains an operational ingest hook.
+Current implementation: `/ask` runs the vendored **headless GPT Researcher** Python entrypoint
+(`trask_headless_research.py`, same library as upstream `cli.py`), pins the request to this repo's
+hardcoded approved source list, and renders the returned report into a Discord-native briefing with
+inline numeric citations plus a compact `Sources` block. `/sources` remains as an admin-facing policy
+inspection command. `/queue-reindex` remains an operational ingest hook.
 
-Config prefix: `TRASK_*`. Reads `TRASK_ALLOWED_GUILD_IDS` and `TRASK_APPROVED_CHANNEL_IDS` for
-scope restrictions, plus `TRASK_RESEARCHWIZARD_BASE_URL`, `TRASK_RESEARCHWIZARD_API_KEY`,
-and `TRASK_RESEARCHWIZARD_TIMEOUT_MS` for the vendor-backed answer path.
+Config prefix: `TRASK_*`. Reads `TRASK_ALLOWED_GUILD_IDS` and `TRASK_APPROVED_CHANNEL_IDS` for scope
+restrictions, plus `TRASK_GPT_RESEARCHER_ROOT`, `TRASK_GPT_RESEARCHER_PYTHON`, optional
+`TRASK_GPT_RESEARCHER_SCRIPT`, and `TRASK_RESEARCHWIZARD_TIMEOUT_MS` for the research subprocess.
 
 Next phase: tighten the vendor adapter contract, normalize source metadata further, and decide
 whether ingest-worker remains a secondary indexing path or becomes maintainer-only infrastructure.
@@ -80,18 +80,26 @@ Next phase: streak bonuses on daily claim, admin credit adjustment command.
 
 Purpose: shared indexing and source refresh orchestration.
 
-CLI commands: `list-sources`, `queue-reindex [sourceIds...]`, `show-indexed`, `show-config`.
+CLI commands: `list-sources`, `queue-reindex [sourceIds...]`, `reindex-now [sourceIds...]`,
+`drain-queue`, `run-queue-worker [pollMs]`, `show-indexed`, `show-config`.
 
-Current implementation: `queue-reindex` fetches each source's `homeUrl` via `node:fetch`,
-strips HTML, chunks text into ~500-word pieces, persists each chunk via `FileChunkStore`,
-and writes a `_index.json` manifest per source recording chunk count and fetch timestamp.
-`show-indexed` reads all manifests and prints a table of what has been indexed.
-A 1-second delay is applied between sources to avoid hammering external servers.
+Current implementation:
+- `queue-reindex` writes source IDs into a persisted queue file (`reindex-queue.json`) under
+	`INGEST_STATE_DIR`.
+- `drain-queue` runs one queue-processing pass: loads queued IDs, indexes known sources, and
+	re-queues failed source IDs for retry.
+- `run-queue-worker` executes the same drain logic continuously on a configurable poll interval.
+- `reindex-now` performs immediate indexing without queueing.
+- Source indexing fetches each source's `homeUrl` (Firecrawl markdown when configured,
+	raw HTTP + HTML strip fallback otherwise), chunks text into ~500-word pieces, persists each
+	chunk via `FileChunkStore`, and writes a `_index.json` manifest per source recording chunk
+	count and fetch timestamp.
+- A 1-second delay is applied between sources to avoid hammering external servers.
 
 Config: reads `INGEST_STATE_DIR` and shared AI config.
 
-Next phase: Firecrawl-backed scrape for JavaScript-rendered pages, GitHub README/wiki sync,
-Discord channel backfill, OpenAI embeddings, and chunk storage in pgvector.
+Next phase: deeper multi-page crawl policies (per-source depth/path controls), GitHub README/wiki
+sync, Discord channel backfill, OpenAI embeddings, and chunk storage in pgvector.
 
 ---
 

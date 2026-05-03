@@ -1,32 +1,11 @@
 {
   "compilerOptions": {
-    "target": "ES2023",
+    "target": "ES2022",
     "lib": [
-      "ES2023"
+      "ES2022"
     ],
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
-    "baseUrl": ".",
-    "paths": {
-      "@openkotor/config": [
-        "packages/config/src/index.ts"
-      ],
-      "@openkotor/core": [
-        "packages/core/src/index.ts"
-      ],
-      "@openkotor/discord-ui": [
-        "packages/discord-ui/src/index.ts"
-      ],
-      "@openkotor/persistence": [
-        "packages/persistence/src/index.ts"
-      ],
-      "@openkotor/personas": [
-        "packages/personas/src/index.ts"
-      ],
-      "@openkotor/retrieval": [
-        "packages/retrieval/src/index.ts"
-      ]
-    },
     "types": [
       "node"
     ],

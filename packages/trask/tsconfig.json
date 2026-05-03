@@ -1,0 +1,23 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "composite": true,
+    "rootDir": "src",
+    "outDir": "dist",
+    "tsBuildInfoFile": "dist/.tsbuildinfo"
+  },
+  "references": [
+    {
+      "path": "../config"
+    },
+    {
+      "path": "../retrieval"
+    },
+    {
+      "path": "../persistence"
+    }
+  ],
+  "include": [
+    "src/**/*.ts"
+  ]
+}

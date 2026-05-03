@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>OpenKotOR — Discord bots</title>
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <div class="wrap">
+      <header class="hero">
+        <p class="eyebrow">OpenKotOR · Discord bots</p>
+        <h1>Discord bots</h1>
+        <p class="lede">
+          Invite links, documentation, and quick-start anchors for every Discord bot in this repo. Invites use the same permission integers as
+          <code>scripts/discord-install-links.ts</code> (set each bot’s application ID at build time to enable its invite button).
+        </p>
+      </header>
+
+      <main class="hub-grid">
+        <!-- Trask -->
+        <section class="bot-panel card" aria-labelledby="trask-title">
+          <div class="bot-panel-head">
+            <h2 id="trask-title">Trask</h2>
+            <p class="bot-tagline">KOTOR Q&amp;A with citations — use <code>/ask</code> in Discord.</p>
+          </div>
+          <ul class="bot-link-row">
+            <li>
+              <a id="trask-invite" class="btn primary hidden" href="#" rel="noopener noreferrer">Invite Trask</a>
+            </li>
+            <li><a id="trask-docs" class="btn ghost" href="#" rel="noopener noreferrer">Documentation</a></li>
+            <li><a id="trask-quickstart" class="btn ghost" href="#" rel="noopener noreferrer">Quick start</a></li>
+          </ul>
+          <p id="trask-invite-missing" class="callout warn hidden">
+            Set <code>VITE_TRASK_DISCORD_APPLICATION_ID</code> at build time (or GitHub Actions variable <code>TRASK_DISCORD_APP_ID</code>) for the invite URL.
+          </p>
+          <p class="perm-foot muted">Permissions: <code id="trask-perms"></code></p>
+        </section>
+
+        <!-- HK -->
+        <section class="bot-panel card" aria-labelledby="hk-title">
+          <div class="bot-panel-head">
+            <h2 id="hk-title">HK-86</h2>
+            <p class="bot-tagline">Curated self-assignable roles — <code>/designations</code> and optional reaction panels.</p>
+          </div>
+          <ul class="bot-link-row">
+            <li>
+              <a id="hk-invite" class="btn primary hidden" href="#" rel="noopener noreferrer">Invite HK-86</a>
+            </li>
+            <li><a id="hk-docs" class="btn ghost" href="#" rel="noopener noreferrer">Documentation</a></li>
+            <li><a id="hk-quickstart" class="btn ghost" href="#" rel="noopener noreferrer">Quick start</a></li>
+          </ul>
+          <p class="hk-extra">
+            <a id="hk-panels-json" class="text-link" href="#" rel="noopener noreferrer">Reaction panels example JSON</a>
+          </p>
+          <p id="hk-invite-missing" class="callout warn hidden">
+            Set <code>VITE_HK_DISCORD_APPLICATION_ID</code> or <code>VITE_DISCORD_APPLICATION_ID</code> (or variable <code>HK86_DISCORD_APP_ID</code>) for the invite URL.
+          </p>
+          <p class="perm-foot muted">
+            Permissions: <code id="hk-perms"></code> — reaction-ready HK invite (Manage Roles, reactions, slash). Matches
+            <code>scripts/discord-install-links.ts</code>.
+          </p>
+          <details class="hk-details">
+            <summary>Operator checklist (reaction panels)</summary>
+            <ol class="steps">
+              <li>
+                Put <code>reaction-role-panels.json</code> under the HK data directory (default <code>data/hk-bot/</code>; override with <code>HK_DATA_DIR</code>). The bot watches the file — edits apply without restart.
+              </li>
+              <li>Run <code>/designations reactions help</code> in Discord for the full setup embed.</li>
+              <li>Use <code>/designations reactions status</code> (Manage Server) to verify config.</li>
+            </ol>
+          </details>
+        </section>
+
+        <!-- Pazaak -->
+        <section class="bot-panel card" aria-labelledby="pazaak-title">
+          <div class="bot-panel-head">
+            <h2 id="pazaak-title">Pazaak Bot</h2>
+            <p class="bot-tagline">Pazaak tables, wallets, and challenges — <code>/pazaak</code> commands.</p>
+          </div>
+          <ul class="bot-link-row">
+            <li>
+              <a id="pazaak-invite" class="btn primary hidden" href="#" rel="noopener noreferrer">Invite Pazaak Bot</a>
+            </li>
+            <li><a id="pazaak-docs" class="btn ghost" href="#" rel="noopener noreferrer">Documentation</a></li>
+            <li><a id="pazaak-quickstart" class="btn ghost" href="#" rel="noopener noreferrer">Quick start</a></li>
+          </ul>
+          <p id="pazaak-invite-missing" class="callout warn hidden">
+            Set <code>VITE_PAZAAK_DISCORD_APPLICATION_ID</code> at build time (or GitHub Actions variable <code>PAZAAK_DISCORD_APP_ID</code>) for the invite URL.
+          </p>
+          <p class="perm-foot muted">Permissions: <code id="pazaak-perms"></code></p>
+        </section>
+      </main>
+
+      <footer class="foot">
+        <span>Static hub served from GitHub Pages under <code>/bots/hk86/</code>. Ingest worker is not a Discord bot — it has no invite here.</span>
+      </footer>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

@@ -1,11 +1,41 @@
 import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
-import type { AdvisorAction, AdvisorAlternative, AdvisorCategory, AdvisorConfidence, AdvisorDifficulty, SerializedMatch, SerializedPlayerState, SideCardOption } from "../types.ts";
+import type {
+  AdvisorAction,
+  AdvisorAlternative,
+  AdvisorCategory,
+  AdvisorConfidence,
+  AdvisorDifficulty,
+  PazaakCardBackStyle,
+  PazaakTableAmbience,
+  PazaakTableTheme,
+  SerializedMatch,
+  SerializedPlayerState,
+  SideCardOption,
+} from "../types.ts";
 import type { ChatMessage, MatchSocketConnectionState } from "../api.ts";
 import { draw, stand, endTurn, playSideCard, forfeit, fetchMe } from "../api.ts";
 import { getAdvisorSnapshot, getSideCardOptions, WIN_SCORE, SETS_TO_WIN } from "../game-utils.ts";
+import { getCardReference, normalizeSideDeckToken } from "@openkotor/pazaak-engine";
 import { QuickSideboardSwitcher } from "./QuickSideboardSwitcher.tsx";
 
+const describeCardTooltip = (rawLabel: string): string => {
+  const collapsed = rawLabel.trim().replace(/\s+/g, "");
+  const token = normalizeSideDeckToken(collapsed) ?? normalizeSideDeckToken(rawLabel.trim());
+  const ref = token ? getCardReference(token) : undefined;
+  if (!ref) return rawLabel;
+  const delta = ref.token.startsWith("+") || ref.token.startsWith("-") ? ` Applies ${ref.token}.` : "";
+  return `${ref.displayLabel} — ${ref.mechanic}${delta} When to use: ${ref.whenToUse}`;
+};
+
 const CHAT_OPEN_STORAGE_KEY = "pazaak-world-chat-open-v1";
+
+export type GameBoardVisualSettings = {
+  tableTheme: PazaakTableTheme;
+  cardBackStyle: PazaakCardBackStyle;
+  tableAmbience: PazaakTableAmbience;
+  /** When false, hide MMR / RD in the table header (matches Settings → Show ratings in game). */
+  showRatingsInGame?: boolean;
+};
 
 interface GameBoardProps {
   match: SerializedMatch;
@@ -17,10 +47,26 @@ interface GameBoardProps {
   onMatchUpdate: (match: SerializedMatch) => void;
   onOpenWorkshop: () => void;
   onReturnToLobby?: () => void;
+  onSignIn?: () => void;
   onExit: () => void;
+  /** Table / card-back / ambience from saved user settings (drives board styling). */
+  visualSettings?: GameBoardVisualSettings;
 }
 
-export function GameBoard({ match, userId, accessToken, socketState, chatMessages, onSendChat, onMatchUpdate, onOpenWorkshop, onReturnToLobby, onExit }: GameBoardProps) {
+export function GameBoard({
+  match,
+  userId,
+  accessToken,
+  socketState,
+  chatMessages,
+  onSendChat,
+  onMatchUpdate,
+  onOpenWorkshop,
+  onReturnToLobby,
+  onSignIn,
+  onExit,
+  visualSettings,
+}: GameBoardProps) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [advisorDifficulty, setAdvisorDifficulty] = useState<AdvisorDifficulty>("professional");
@@ -41,6 +87,7 @@ export function GameBoard({ match, userId, accessToken, socketState, chatMessage
   const [postGameStreak, setPostGameStreak] = useState<number | null>(null);
   const [animatedMmr, setAnimatedMmr] = useState<number | null>(null);
   const [mmrDeltaDisplay, setMmrDeltaDisplay] = useState<number | null>(null);
+  const [walletRd, setWalletRd] = useState<number | null>(null);
   const [soundEnabled, setSoundEnabled] = useState(false);
   const [reducedMotionEnabled, setReducedMotionEnabled] = useState(false);
   const [prefersReducedMotion, setPrefersReducedMotion] = useState(false);
@@ -83,10 +130,13 @@ export function GameBoard({ match, userId, accessToken, socketState, chatMessage
   const cardOptions = myPlayer && (match.phase === "after-draw") && isMyTurn
     ? getSideCardOptions(myPlayer)
     : [];
-  const advisorSnapshot = myPlayer ? getAdvisorSnapshot(match, userId, advisorDifficulty) : null;
+  const advisorEnabled = match.wager === 0;
+  const advisorSnapshot = myPlayer && advisorEnabled ? getAdvisorSnapshot(match, userId, advisorDifficulty) : null;
   const advisor = advisorSnapshot?.recommendation ?? null;
   const disconnectedSince = match.disconnectedSince ?? {};
   const aiSeats = match.aiSeats ?? {};
+  const targetSetsToWin = match.setsToWin ?? SETS_TO_WIN;
+  const showRatingsInGame = visualSettings?.showRatingsInGame ?? true;
 
   const isCompleted = match.phase === "completed";
   const accountDisplayName = myPlayer?.displayName ?? "Spectator";
@@ -148,17 +198,23 @@ export function GameBoard({ match, userId, accessToken, socketState, chatMessage
     fetchMe(accessToken).then((me) => {
       setPreGameMmr(me.wallet.mmr);
       setPreGameStreak(me.wallet.streak);
+      setWalletRd(typeof me.wallet.mmrRd === "number" ? me.wallet.mmrRd : null);
       setSoundEnabled(me.wallet.userSettings.soundEnabled);
       setReducedMotionEnabled(me.wallet.userSettings.reducedMotionEnabled);
     }).catch(() => { });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  const tableTheme = visualSettings?.tableTheme ?? "ebon-hawk";
+  const cardBackStyle = visualSettings?.cardBackStyle ?? "classic";
+  const tableAmbience = visualSettings?.tableAmbience ?? "cantina";
+
   useEffect(() => {
     if (!isCompleted) return;
     fetchMe(accessToken).then((me) => {
       setPostGameMmr(me.wallet.mmr);
       setPostGameStreak(me.wallet.streak);
+      setWalletRd(typeof me.wallet.mmrRd === "number" ? me.wallet.mmrRd : null);
       setReducedMotionEnabled(me.wallet.userSettings.reducedMotionEnabled);
     }).catch(() => { });
   }, [isCompleted, accessToken]);
@@ -180,6 +236,12 @@ export function GameBoard({ match, userId, accessToken, socketState, chatMessage
     if (mmrAnimFrameRef.current !== null) {
       window.cancelAnimationFrame(mmrAnimFrameRef.current);
       mmrAnimFrameRef.current = null;
+    }
+
+    if (!showRatingsInGame) {
+      setMmrDeltaDisplay(null);
+      setAnimatedMmr(accountMmr);
+      return;
     }
 
     if (!isCompleted || preGameMmr === null || postGameMmr === null) {
@@ -223,7 +285,7 @@ export function GameBoard({ match, userId, accessToken, socketState, chatMessage
         mmrAnimFrameRef.current = null;
       }
     };
-  }, [accountMmr, isCompleted, postGameMmr, preGameMmr, shouldReduceMotion]);
+  }, [accountMmr, isCompleted, postGameMmr, preGameMmr, shouldReduceMotion, showRatingsInGame]);
 
   useEffect(() => {
     const previousIsMyTurn = previousIsMyTurnRef.current;
@@ -425,7 +487,12 @@ export function GameBoard({ match, userId, accessToken, socketState, chatMessage
 
 
   return (
-    <div className="game-board">
+    <div
+      className="game-board"
+      data-table-theme={tableTheme}
+      data-card-back={cardBackStyle}
+      data-table-ambience={tableAmbience}
+    >
       {/* Header */}
       <header className="game-header">
         <div className="game-header__title-group">
@@ -458,9 +525,14 @@ export function GameBoard({ match, userId, accessToken, socketState, chatMessage
           <span className="game-header__account-icon" aria-hidden="true">◌</span>
           <span className="game-header__account-copy">
             <strong>{accountDisplayName}</strong>
-            <small className={`game-header__mmr${isCompleted && mmrDeltaDisplay !== null ? ` game-header__mmr--${mmrDeltaDisplay >= 0 ? "gain" : "loss"}` : ""}`}>
-              {`MMR: ${displayedAccountMmr ?? "--"}`}
-            </small>
+            {showRatingsInGame ? (
+              <small className={`game-header__mmr${isCompleted && mmrDeltaDisplay !== null ? ` game-header__mmr--${mmrDeltaDisplay >= 0 ? "gain" : "loss"}` : ""}`}>
+                {`MMR: ${displayedAccountMmr ?? "--"}`}
+                {walletRd !== null ? ` · RD ${Math.round(walletRd)}` : ""}
+              </small>
+            ) : (
+              <small className="game-header__mmr">Ratings hidden</small>
+            )}
           </span>
         </div>
         <div className="game-header__actions">
@@ -520,7 +592,7 @@ export function GameBoard({ match, userId, accessToken, socketState, chatMessage
       </div>
 
       {roundSummary ? (
-        <div className="round-summary-modal" role="dialog" aria-modal="true" aria-label="Round summary" onKeyDown={handleRoundSummaryKeyDown}>
+        <div className="round-summary-modal" role="dialog" aria-modal="true" aria-label="Set summary" onKeyDown={handleRoundSummaryKeyDown}>
           <div className="round-summary-modal__card" role="document">
             <h3>{roundSummary.title}</h3>
             <p>{roundSummary.body}</p>
@@ -600,7 +672,7 @@ export function GameBoard({ match, userId, accessToken, socketState, chatMessage
             connectionState={disconnectedSince[myPlayer.userId] ? "disconnected" : aiSeats[myPlayer.userId] ? "ai_takeover" : "connected"}
           />
         ) : (
-          <SpectatorPanel />
+          <SpectatorPanel isGuest={accessToken.startsWith("local-guest-token:")} onSignIn={onSignIn} />
         )}
       </div>
 
@@ -703,16 +775,24 @@ export function GameBoard({ match, userId, accessToken, socketState, chatMessage
             <div className="side-cards" role="group" aria-label="Play a side card">
               <span className="side-cards__label">Play a side card:</span>
               <div className="side-cards__grid">
-                {cardOptions.map((opt, i) => (
-                  <button
-                    key={`${opt.cardId}-${opt.appliedValue}-${i}`}
-                    className="btn btn--card"
-                    onClick={() => handlePlayCard(opt)}
-                    disabled={busy}
-                  >
-                    {opt.displayLabel}
-                  </button>
-                ))}
+                {cardOptions.map((opt, i) => {
+                  const tipBase = describeCardTooltip(opt.displayLabel);
+                  const tip = `${tipBase} This play applies ${opt.appliedValue >= 0 ? "+" : ""}${opt.appliedValue}.`;
+                  const tipId = `side-card-tip-${opt.cardId}-${i}`;
+                  return (
+                    <button
+                      key={`${opt.cardId}-${opt.appliedValue}-${i}`}
+                      className="btn btn--card"
+                      onClick={() => handlePlayCard(opt)}
+                      disabled={busy}
+                      title={tip}
+                      aria-describedby={tipId}
+                    >
+                      {opt.displayLabel}
+                      <span id={tipId} className="sr-only">{tip}</span>
+                    </button>
+                  );
+                })}
               </div>
             </div>
           )}
@@ -752,7 +832,7 @@ export function GameBoard({ match, userId, accessToken, socketState, chatMessage
       {/* Completed */}
       {isCompleted && (
         <div className="game-result">
-          {!shouldReduceMotion && mmrDeltaDisplay !== null && mmrDeltaDisplay !== 0 ? (
+          {!shouldReduceMotion && showRatingsInGame && mmrDeltaDisplay !== null && mmrDeltaDisplay !== 0 ? (
             <div className={`game-result__flare game-result__flare--${mmrDeltaDisplay > 0 ? "gain" : "loss"}`} aria-hidden="true">
               {Array.from({ length: 10 }).map((_, index) => <span key={`flare-${index}`} />)}
             </div>
@@ -765,12 +845,13 @@ export function GameBoard({ match, userId, accessToken, socketState, chatMessage
             <p className="game-result__draw">It's a draw.</p>
           )}
           <p className="game-result__status">{match.statusLine}</p>
-          {postGameMmr !== null && (() => {
+          {showRatingsInGame && postGameMmr !== null && (() => {
             const delta = mmrDeltaDisplay;
             return (
               <>
                 <p className="game-result__mmr">
                   MMR: {animatedMmr ?? postGameMmr}
+                  {walletRd !== null ? ` · RD ${Math.round(walletRd)}` : ""}
                   {delta !== null && (
                     <span className={`game-result__mmr-delta ${delta >= 0 ? "game-result__mmr-delta--gain" : "game-result__mmr-delta--loss"}`}>
                       {delta >= 0 ? `+${delta}` : `${delta}`}
@@ -813,7 +894,7 @@ export function GameBoard({ match, userId, accessToken, socketState, chatMessage
 
       {/* Score legend */}
       <footer className="game-footer">
-        First to {SETS_TO_WIN} set wins · Target: {WIN_SCORE}
+        First to {targetSetsToWin} set wins · Target: {WIN_SCORE}
       </footer>
     </div>
   );
@@ -1060,9 +1141,17 @@ function PlayerPanel({ player, isActive, label, isMe = false, connectionState = 
         <div className="player-hand">
           {player.hand.map((card) => {
             const used = player.usedCardIds.includes(card.id);
+            const tip = describeCardTooltip(card.label);
+            const tipId = `hand-card-tip-${card.id}`;
             return (
-              <span key={card.id} className={`hand-card ${used ? "hand-card--used" : ""}`}>
+              <span
+                key={card.id}
+                className={`hand-card ${used ? "hand-card--used" : ""}`}
+                title={tip}
+                aria-describedby={tipId}
+              >
                 {card.label}
+                <span id={tipId} className="sr-only">{tip}</span>
               </span>
             );
           })}
@@ -1072,10 +1161,15 @@ function PlayerPanel({ player, isActive, label, isMe = false, connectionState = 
   );
 }
 
-function SpectatorPanel() {
+function SpectatorPanel({ isGuest, onSignIn }: { isGuest?: boolean; onSignIn?: () => void }) {
   return (
     <div className="player-panel player-panel--spectator">
       <p className="spectator-label">You are spectating this match.</p>
+      {isGuest && onSignIn && (
+        <button className="pazaak-btn pazaak-btn--secondary spectator-signin-btn" onClick={onSignIn}>
+          Sign in to play
+        </button>
+      )}
     </div>
   );
 }

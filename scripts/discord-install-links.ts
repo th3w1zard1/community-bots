@@ -38,7 +38,8 @@ const installs = [
   {
     name: "HK",
     appId: readRequiredEnv("HK_DISCORD_APP_ID"),
-    permissions: 268454912n,
+    /** Align with hk-bot `HK_REACTION_BOT_PERMISSIONS` (reaction panels + roles). */
+    permissions: 2416266304n,
   },
   {
     name: "Pazaak Bot",

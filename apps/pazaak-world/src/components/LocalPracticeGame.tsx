@@ -13,7 +13,7 @@ import {
   startAmbientMusic,
 } from "../utils/ambientAudio.ts";
 
-type LocalCardType = "plus" | "minus" | "flex" | "flip" | "tiebreaker";
+type LocalCardType = "plus" | "minus" | "flex" | "flip" | "copy" | "tiebreaker" | "valueChange";
 
 interface LocalSideCard {
   id: string;
@@ -62,6 +62,8 @@ const MAX_BOARD = 9;
 const SETS_TO_WIN_LOCAL = 3;
 const LOCAL_STATS_KEY = "pazaak-world-local-practice-stats-v1";
 const LOCAL_SOUND_KEY = "pazaak-world-sound-enabled-v1";
+
+const pickLocalStarter = (): "human" | "ai" => Math.random() > 0.5 ? "human" : "ai";
 
 // ---------------------------------------------------------------------------
 // Audio helpers (Web Audio API, no external assets)
@@ -140,7 +142,7 @@ const createMainDeck = (): number[] => {
 };
 
 const createSideDeck = (): LocalSideCard[] => {
-  const deck: LocalSideCard[] = [
+  return [
     { id: randomId(), label: "+1", value: 1, type: "plus", used: false },
     { id: randomId(), label: "+2", value: 2, type: "plus", used: false },
     { id: randomId(), label: "+3", value: 3, type: "plus", used: false },
@@ -149,22 +151,9 @@ const createSideDeck = (): LocalSideCard[] => {
     { id: randomId(), label: "-3", value: 3, type: "minus", used: false },
     { id: randomId(), label: "-4", value: 4, type: "minus", used: false },
     { id: randomId(), label: "+/-2", value: 2, type: "flex", used: false },
-    { id: randomId(), label: "+/-4", value: 4, type: "flex", used: false },
-    { id: randomId(), label: "+5", value: 5, type: "plus", used: false },
+    { id: randomId(), label: "D", value: 0, type: "copy", used: false },
+    { id: randomId(), label: "1+/-2", value: 2, type: "valueChange", used: false },
   ];
-
-  if (Math.random() < 0.1) {
-    const roll = Math.random();
-    if (roll < 0.67) {
-      const flipValue = Math.random() < 0.5 ? 3 : 2;
-      const partner = flipValue === 3 ? 6 : 4;
-      deck.push({ id: randomId(), label: `Flip ${flipValue}&${partner}`, value: flipValue, type: "flip", used: false });
-    } else {
-      deck.push({ id: randomId(), label: "+-1T", value: 1, type: "tiebreaker", used: false });
-    }
-  }
-
-  return deck;
 };
 
 const createSideCardFromToken = (token: string): LocalSideCard | null => {
@@ -193,8 +182,16 @@ const createSideCardFromToken = (token: string): LocalSideCard | null => {
     return { id: randomId(), label: "Flip 3&6", value: 3, type: "flip", used: false };
   }
 
+  if (normalized === "$$" || normalized === "D") {
+    return { id: randomId(), label: "D", value: 0, type: "copy", used: false };
+  }
+
   if (normalized === "TT") {
-    return { id: randomId(), label: "+-1T", value: 1, type: "tiebreaker", used: false };
+    return { id: randomId(), label: "+/-1T", value: 1, type: "tiebreaker", used: false };
+  }
+
+  if (normalized === "VV" || normalized === "1+/-2" || normalized === "+/-1/2") {
+    return { id: randomId(), label: "1+/-2", value: 2, type: "valueChange", used: false };
   }
 
   return null;
@@ -202,7 +199,7 @@ const createSideCardFromToken = (token: string): LocalSideCard | null => {
 
 const createOpponentSideDeck = (profile: LocalOpponentProfile): LocalSideCard[] => {
   const mapped = profile.sideDeckTokens
-    .map((token) => createSideCardFromToken(token))
+    .map((token: string) => createSideCardFromToken(token))
     .filter((card): card is LocalSideCard => card !== null);
 
   if (mapped.length >= 10) {
@@ -274,7 +271,7 @@ const aiShouldStand = (
 const aiPickRescueCard = (player: LocalPlayer): LocalSideCard | null => {
   const overage = player.total - TARGET_SCORE;
   return player.sideDeck
-    .filter((c) => !c.used && (c.type === "minus" || c.type === "flex") && c.value >= overage)
+    .filter((c) => !c.used && (c.type === "minus" || c.type === "flex" || c.type === "valueChange") && c.value >= overage)
     .sort((a, b) => a.value - b.value)[0] ?? null;
 };
 
@@ -283,8 +280,19 @@ const aiPickExactCard = (player: LocalPlayer): LocalSideCard | null => {
   if (needed <= 0) return null;
   return player.sideDeck.find((c) => {
     if (c.used) return false;
+    if (c.type === "valueChange") return needed <= 2;
     return (c.type === "plus" || c.type === "flex" || c.type === "tiebreaker") && c.value === needed;
   }) ?? null;
+};
+
+const getAiRecoveryDelta = (card: LocalSideCard, overage: number): number => {
+  if (card.type === "valueChange") return -Math.min(2, Math.max(1, overage));
+  return -card.value;
+};
+
+const getAiExactDelta = (card: LocalSideCard, needed: number): number => {
+  if (card.type === "valueChange") return Math.min(2, Math.max(1, needed));
+  return card.type === "minus" ? -card.value : card.value;
 };
 
 const aiPickSetupCard = (player: LocalPlayer, difficulty: AdvisorDifficulty): LocalSideCard | null => {
@@ -354,7 +362,10 @@ export function LocalPracticeGame({ username, difficulty, opponentId, onExit }: 
   const [ai, setAi] = useState<LocalPlayer>(() => createPlayer(opponentProfile.name, createOpponentSideDeck(opponentProfile)));
   const [mainDeck, setMainDeck] = useState<number[]>(() => createMainDeck());
   const [phase, setPhase] = useState<LocalGamePhase>("playing");
-  const [isHumanTurn, setIsHumanTurn] = useState<boolean>(() => Math.random() > 0.5);
+  const [initialSetStarter, setInitialSetStarter] = useState<"human" | "ai">(() => pickLocalStarter());
+  const [isHumanTurn, setIsHumanTurn] = useState<boolean>(() => initialSetStarter === "human");
+  const [turnStage, setTurnStage] = useState<"draw" | "resolve">("draw");
+  const [sideCardPlayedThisTurn, setSideCardPlayedThisTurn] = useState(false);
   const [roundNumber, setRoundNumber] = useState(1);
   const [roundSummary, setRoundSummary] = useState<string>("Local match started.");
   const [actionLog, setActionLog] = useState<string[]>(() => [
@@ -384,7 +395,7 @@ export function LocalPracticeGame({ username, difficulty, opponentId, onExit }: 
     };
   }, [musicEnabled]);
 
-  const [flexPrompt, setFlexPrompt] = useState<{ cardId: string; label: string; value: number } | null>(null);
+  const [flexPrompt, setFlexPrompt] = useState<{ cardId: string; label: string; choices: number[] } | null>(null);
   const [latestOpponentQuote, setLatestOpponentQuote] = useState<string>(
     () => opponentProfile.phrases.chosen[0] ?? opponentProfile.description
   );
@@ -456,7 +467,6 @@ export function LocalPracticeGame({ username, difficulty, opponentId, onExit }: 
       bust: false,
       stood: false,
       hasTiebreaker: false,
-      sideDeck: nextHuman.sideDeck.map((c) => ({ ...c, used: false })),
     });
     setAi({
       ...nextAi,
@@ -466,11 +476,12 @@ export function LocalPracticeGame({ username, difficulty, opponentId, onExit }: 
       bust: false,
       stood: false,
       hasTiebreaker: false,
-      sideDeck: nextAi.sideDeck.map((c) => ({ ...c, used: false })),
     });
     setMainDeck(createMainDeck());
     setRoundNumber((value) => value + 1);
-    setIsHumanTurn(firstTurn === "human" ? true : firstTurn === "ai" ? false : Math.random() > 0.5);
+    setIsHumanTurn(firstTurn === "human" ? true : firstTurn === "ai" ? false : initialSetStarter === "human");
+    setTurnStage("draw");
+    setSideCardPlayedThisTurn(false);
     setPhase("playing");
   };
 
@@ -537,7 +548,7 @@ export function LocalPracticeGame({ username, difficulty, opponentId, onExit }: 
       return;
     }
 
-    const nextFirst: "human" | "ai" | "random" = setWinner === "human" ? "ai" : setWinner === "ai" ? "human" : "random";
+    const nextFirst: "human" | "ai" | "random" = setWinner === "human" ? "ai" : setWinner === "ai" ? "human" : initialSetStarter;
     setSetResult({
       summary,
       humanTotal: scoredHuman.bust ? -1 : scoredHuman.total,
@@ -551,6 +562,10 @@ export function LocalPracticeGame({ username, difficulty, opponentId, onExit }: 
   };
 
   const drawFor = (target: "human" | "ai") => {
+    if (target === "human" && turnStage !== "draw") {
+      return;
+    }
+
     if (mainDeck.length === 0) {
       setPhase("round_end");
       return;
@@ -560,20 +575,21 @@ export function LocalPracticeGame({ username, difficulty, opponentId, onExit }: 
     setMainDeck((previous) => previous.slice(0, -1));
 
     if (target === "human") {
-      let next = scorePlayer({ ...human, board: [...human.board, value] });
-      const autoStand = next.total === TARGET_SCORE && !next.bust;
-      if (autoStand) {
-        next = { ...next, stood: true };
-        pushLog(`${human.name} draws ${value} and auto-stands at 20.`);
-      } else {
-        pushLog(`${human.name} draws ${value} (total ${next.total}).`);
-      }
+      const next = scorePlayer({ ...human, board: [...human.board, value] });
+      pushLog(`${human.name} draws ${value} (total ${next.total}).`);
       if (soundEnabled) playLocalTone("draw");
       setHuman(next);
-      if (next.bust || next.board.length >= MAX_BOARD) {
+      if (next.board.length >= MAX_BOARD) {
         setPhase("round_end");
+      } else if (next.bust) {
+        pushLog(`${human.name} must recover with one side card or the set is lost.`);
+        setIsHumanTurn(true);
+        setTurnStage("resolve");
+        setSideCardPlayedThisTurn(false);
       } else {
-        setIsHumanTurn(false);
+        setIsHumanTurn(true);
+        setTurnStage("resolve");
+        setSideCardPlayedThisTurn(false);
       }
       return;
     }
@@ -591,68 +607,87 @@ export function LocalPracticeGame({ username, difficulty, opponentId, onExit }: 
       setPhase("round_end");
     } else {
       setIsHumanTurn(true);
+      setTurnStage("draw");
     }
   };
 
   const applyHumanSideCard = (cardId: string) => {
+    if (turnStage !== "resolve" || sideCardPlayedThisTurn || flexPrompt) return;
+
     const card = human.sideDeck.find((entry) => entry.id === cardId && !entry.used);
     if (!card) return;
 
     const nextDeck = human.sideDeck.map((entry) => (entry.id === card.id ? { ...entry, used: true } : entry));
 
     if (card.type === "flex") {
-      setFlexPrompt({ cardId: card.id, label: card.label, value: card.value });
+      setFlexPrompt({ cardId: card.id, label: card.label, choices: [card.value, -card.value] });
+      return;
+    }
+
+    if (card.type === "valueChange") {
+      setFlexPrompt({ cardId: card.id, label: card.label, choices: [1, 2, -1, -2] });
+      return;
+    }
+
+    if (card.type === "tiebreaker") {
+      setFlexPrompt({ cardId: card.id, label: card.label, choices: [1, -1] });
       return;
     }
 
     if (card.type === "flip") {
       const flipValues = new Set([card.value, card.value * 2]);
       const flipped = human.board.map((v) => (flipValues.has(Math.abs(v)) ? -v : v));
-      let next = scorePlayer({ ...human, sideDeck: nextDeck, board: flipped });
-      if (next.total === TARGET_SCORE && !next.bust) next = { ...next, stood: true };
+      const next = scorePlayer({ ...human, sideDeck: nextDeck, board: [...flipped, 0] });
       setHuman(next);
       pushLog(`${human.name} plays ${card.label} and flips the board (total ${next.total}).`);
+      setSideCardPlayedThisTurn(true);
       if (next.bust || next.board.length >= MAX_BOARD) setPhase("round_end");
-      else setIsHumanTurn(false);
+      else setTurnStage("resolve");
       return;
     }
 
-    if (card.type === "tiebreaker") {
-      let next = scorePlayer({ ...human, sideDeck: nextDeck, board: [...human.board, 1], hasTiebreaker: true });
-      if (next.total === TARGET_SCORE && !next.bust) next = { ...next, stood: true };
+    if (card.type === "copy") {
+      const previousValue = human.board.at(-1);
+      if (previousValue === undefined) return;
+      const next = scorePlayer({ ...human, sideDeck: nextDeck, board: [...human.board, previousValue] });
       setHuman(next);
-      pushLog(`${human.name} plays +-1T (total ${next.total}).`);
+      pushLog(`${human.name} plays ${card.label} as ${previousValue > 0 ? `+${previousValue}` : `${previousValue}`} (total ${next.total}).`);
+      setSideCardPlayedThisTurn(true);
       if (next.bust || next.board.length >= MAX_BOARD) setPhase("round_end");
-      else setIsHumanTurn(false);
+      else setTurnStage("resolve");
       return;
     }
 
     const sign = card.type === "minus" ? -1 : 1;
     const delta = sign * card.value;
-    let next = scorePlayer({ ...human, sideDeck: nextDeck, board: [...human.board, delta] });
-    if (next.total === TARGET_SCORE && !next.bust) next = { ...next, stood: true };
+    const next = scorePlayer({ ...human, sideDeck: nextDeck, board: [...human.board, delta] });
     if (soundEnabled) playLocalTone("card");
     setHuman(next);
     pushLog(`${human.name} plays ${card.label} as ${delta > 0 ? `+${delta}` : `${delta}`} (total ${next.total}).`);
+    setSideCardPlayedThisTurn(true);
     if (next.bust || next.board.length >= MAX_BOARD) setPhase("round_end");
-    else setIsHumanTurn(false);
+    else setTurnStage("resolve");
   };
 
-  const confirmFlex = (sign: 1 | -1) => {
-    if (!flexPrompt) return;
+  const confirmFlex = (delta: number) => {
+    if (!flexPrompt || sideCardPlayedThisTurn) return;
     const card = human.sideDeck.find((c) => c.id === flexPrompt.cardId && !c.used);
     setFlexPrompt(null);
     if (!card) return;
 
     const nextDeck = human.sideDeck.map((c) => (c.id === card.id ? { ...c, used: true } : c));
-    const delta = sign * card.value;
-    let next = scorePlayer({ ...human, sideDeck: nextDeck, board: [...human.board, delta] });
-    if (next.total === TARGET_SCORE && !next.bust) next = { ...next, stood: true };
+    const next = scorePlayer({
+      ...human,
+      sideDeck: nextDeck,
+      board: [...human.board, delta],
+      hasTiebreaker: card.type === "tiebreaker" ? true : human.hasTiebreaker,
+    });
 
     setHuman(next);
     pushLog(`${human.name} plays ${card.label} as ${delta > 0 ? `+${delta}` : `${delta}`} (total ${next.total}).`);
+    setSideCardPlayedThisTurn(true);
     if (next.bust || next.board.length >= MAX_BOARD) setPhase("round_end");
-    else setIsHumanTurn(false);
+    else setTurnStage("resolve");
   };
 
   const humanStand = () => {
@@ -660,6 +695,21 @@ export function LocalPracticeGame({ username, difficulty, opponentId, onExit }: 
     setHuman((previous) => ({ ...previous, stood: true }));
     pushLog(`${human.name} stands on ${human.total}.`);
     setIsHumanTurn(false);
+    setTurnStage("draw");
+    setSideCardPlayedThisTurn(false);
+  };
+
+  const humanEndTurn = () => {
+    if (human.bust) {
+      pushLog(`${human.name} cannot recover and busts at ${human.total}.`);
+      setPhase("round_end");
+      return;
+    }
+
+    pushLog(`${human.name} ends the turn at ${human.total}.`);
+    setIsHumanTurn(false);
+    setTurnStage("draw");
+    setSideCardPlayedThisTurn(false);
   };
 
   useEffect(() => {
@@ -672,19 +722,13 @@ export function LocalPracticeGame({ username, difficulty, opponentId, onExit }: 
     if (isHumanTurn) return;
     if (ai.stood || ai.bust) {
       setIsHumanTurn(true);
+      setTurnStage("draw");
+      setSideCardPlayedThisTurn(false);
       return;
     }
 
     const delay = getAiDelay(difficulty);
     const timeout = window.setTimeout(() => {
-      if (aiShouldStand(ai, human, difficulty, opponentProfile)) {
-        setAi((previous) => ({ ...previous, stood: true }));
-        pushLog(`${ai.name} stands on ${ai.total}.`);
-        speakOpponent("stand", "I will stand.");
-        setIsHumanTurn(true);
-        return;
-      }
-
       if (mainDeck.length === 0) {
         setPhase("round_end");
         return;
@@ -705,7 +749,8 @@ export function LocalPracticeGame({ username, difficulty, opponentId, onExit }: 
         const rescue = aiPickRescueCard(drawnAi);
         if (rescue) {
           const rescuedDeck = drawnAi.sideDeck.map((c) => (c.id === rescue.id ? { ...c, used: true } : c));
-          drawnAi = scorePlayer({ ...drawnAi, sideDeck: rescuedDeck, board: [...drawnAi.board, -rescue.value] });
+          const rescueDelta = getAiRecoveryDelta(rescue, drawnAi.total - TARGET_SCORE);
+          drawnAi = scorePlayer({ ...drawnAi, sideDeck: rescuedDeck, board: [...drawnAi.board, rescueDelta] });
           pushLog(`${ai.name} plays ${rescue.label} to recover (total ${drawnAi.total}).`);
           speakOpponent("play", "Adjusting the board.");
         }
@@ -713,7 +758,7 @@ export function LocalPracticeGame({ username, difficulty, opponentId, onExit }: 
         const exactCard = aiPickExactCard(drawnAi);
         if (exactCard) {
           const exactDeck = drawnAi.sideDeck.map((c) => (c.id === exactCard.id ? { ...c, used: true } : c));
-          const exactDelta = exactCard.type === "minus" ? -exactCard.value : exactCard.value;
+          const exactDelta = getAiExactDelta(exactCard, TARGET_SCORE - drawnAi.total);
           drawnAi = scorePlayer({ ...drawnAi, sideDeck: exactDeck, board: [...drawnAi.board, exactDelta] });
           if (drawnAi.total === TARGET_SCORE && !drawnAi.bust) drawnAi = { ...drawnAi, stood: true };
           pushLog(`${ai.name} plays ${exactCard.label} for an exact finish at ${drawnAi.total}.`);
@@ -725,12 +770,13 @@ export function LocalPracticeGame({ username, difficulty, opponentId, onExit }: 
               const flipValues = new Set([yellowCard.value, yellowCard.value * 2]);
               const flippedBoard = drawnAi.board.map((v) => (flipValues.has(Math.abs(v)) ? -v : v));
               const yellowDeck = drawnAi.sideDeck.map((c) => (c.id === yellowCard.id ? { ...c, used: true } : c));
-              drawnAi = scorePlayer({ ...drawnAi, sideDeck: yellowDeck, board: flippedBoard });
+              drawnAi = scorePlayer({ ...drawnAi, sideDeck: yellowDeck, board: [...flippedBoard, 0] });
               if (drawnAi.total === TARGET_SCORE && !drawnAi.bust) drawnAi = { ...drawnAi, stood: true };
               pushLog(`${ai.name} plays ${yellowCard.label} and flips the board (total ${drawnAi.total}).`);
             } else if (yellowCard.type === "tiebreaker") {
               const yellowDeck = drawnAi.sideDeck.map((c) => (c.id === yellowCard.id ? { ...c, used: true } : c));
-              drawnAi = scorePlayer({ ...drawnAi, sideDeck: yellowDeck, board: [...drawnAi.board, 1], hasTiebreaker: true });
+              const tiebreakerDelta = Math.abs(human.total - drawnAi.total) === 1 ? human.total - drawnAi.total : 1;
+              drawnAi = scorePlayer({ ...drawnAi, sideDeck: yellowDeck, board: [...drawnAi.board, tiebreakerDelta], hasTiebreaker: true });
               if (drawnAi.total === TARGET_SCORE && !drawnAi.bust) drawnAi = { ...drawnAi, stood: true };
               pushLog(`${ai.name} plays Tiebreaker (total ${drawnAi.total}).`);
             }
@@ -747,11 +793,24 @@ export function LocalPracticeGame({ username, difficulty, opponentId, onExit }: 
         }
       }
 
+      if (!drawnAi.bust && !drawnAi.stood && aiShouldStand(drawnAi, human, difficulty, opponentProfile)) {
+        drawnAi = { ...drawnAi, stood: true };
+        pushLog(`${ai.name} stands on ${drawnAi.total}.`);
+        speakOpponent("stand", "I will stand.");
+      }
+
       setAi(drawnAi);
       if (drawnAi.bust || drawnAi.board.length >= MAX_BOARD) {
         setPhase("round_end");
+      } else if (human.stood && !drawnAi.stood) {
+        // If the player has already stood, the AI keeps taking turns until it stands or busts.
+        setIsHumanTurn(false);
+        setTurnStage("draw");
+        setSideCardPlayedThisTurn(false);
       } else {
         setIsHumanTurn(true);
+        setTurnStage("draw");
+        setSideCardPlayedThisTurn(false);
       }
     }, delay);
 
@@ -766,7 +825,14 @@ export function LocalPracticeGame({ username, difficulty, opponentId, onExit }: 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [phase]);
 
-  const canAct = phase === "playing" && isHumanTurn && !human.stood && !human.bust;
+  const canDraw = phase === "playing" && isHumanTurn && !human.stood && !human.bust && turnStage === "draw";
+  const canResolveTurn = phase === "playing" && isHumanTurn && !human.stood && turnStage === "resolve" && flexPrompt === null;
+  const canStand = canResolveTurn && !human.bust;
+  const canPlaySideCard = canResolveTurn && !sideCardPlayedThisTurn;
+  const canPlaySpecificSideCard = (card: LocalSideCard): boolean => {
+    return canPlaySideCard && !card.used && (card.type !== "copy" || human.board.length > 0);
+  };
+  const canEndTurn = canResolveTurn && human.board.length > 0;
   const hasStartedMatch = roundNumber > 1
     || human.board.length > 0
     || ai.board.length > 0
@@ -795,7 +861,11 @@ export function LocalPracticeGame({ username, difficulty, opponentId, onExit }: 
     setAi(freshAi);
     setMainDeck(createMainDeck());
     setPhase("playing");
-    setIsHumanTurn(Math.random() > 0.5);
+    const nextStarter = pickLocalStarter();
+    setInitialSetStarter(nextStarter);
+    setIsHumanTurn(nextStarter === "human");
+    setTurnStage("draw");
+    setSideCardPlayedThisTurn(false);
     setRoundNumber(1);
     setRoundSummary("New match started.");
     setLastOpponentLines({ chosen: opponentProfile.phrases.chosen[0] ?? "..." });
@@ -850,15 +920,21 @@ export function LocalPracticeGame({ username, difficulty, opponentId, onExit }: 
 
       switch (event.key.toLowerCase()) {
         case "d":
-          if (canAct) {
+          if (canDraw) {
             event.preventDefault();
             drawFor("human");
           }
           break;
         case "s":
-          if (canAct) {
+          if (canStand) {
             event.preventDefault();
             humanStand();
+          }
+          break;
+        case "e":
+          if (canEndTurn) {
+            event.preventDefault();
+            humanEndTurn();
           }
           break;
         case "m": {
@@ -886,10 +962,10 @@ export function LocalPracticeGame({ username, difficulty, opponentId, onExit }: 
           const num = event.key >= "1" && event.key <= "9" ? parseInt(event.key) - 1
             : event.key === "0" ? 9
             : -1;
-          if (num >= 0 && canAct && !flexPrompt) {
+          if (num >= 0 && canPlaySideCard && !flexPrompt) {
             const availableCards = human.sideDeck.filter((c) => !c.used);
             const card = availableCards[num];
-            if (card) {
+            if (card && canPlaySpecificSideCard(card)) {
               event.preventDefault();
               applyHumanSideCard(card.id);
             }
@@ -904,7 +980,10 @@ export function LocalPracticeGame({ username, difficulty, opponentId, onExit }: 
   }, [
     ai.board.length,
     ai.roundWins,
-    canAct,
+    canDraw,
+    canEndTurn,
+    canPlaySideCard,
+    canStand,
     hasStartedMatch,
     human.board.length,
     human.roundWins,
@@ -1021,8 +1100,15 @@ export function LocalPracticeGame({ username, difficulty, opponentId, onExit }: 
                 {flexPrompt ? (
                   <div className="local-game__flex-prompt">
                     <span>Play {flexPrompt.label} as:</span>
-                    <button className="btn btn--primary btn--sm" onClick={() => confirmFlex(1)}>+{flexPrompt.value}</button>
-                    <button className="btn btn--secondary btn--sm" onClick={() => confirmFlex(-1)}>-{flexPrompt.value}</button>
+                    {flexPrompt.choices.map((choice) => (
+                      <button
+                        key={choice}
+                        className={`btn ${choice > 0 ? "btn--primary" : "btn--secondary"} btn--sm`}
+                        onClick={() => confirmFlex(choice)}
+                      >
+                        {choice > 0 ? `+${choice}` : `${choice}`}
+                      </button>
+                    ))}
                   </div>
                 ) : (
                   human.sideDeck.map((card) => (
@@ -1030,7 +1116,7 @@ export function LocalPracticeGame({ username, difficulty, opponentId, onExit }: 
                       key={card.id}
                       className={`btn btn--card btn--sm${card.used ? " btn--card--used" : ""}`}
                       onClick={() => applyHumanSideCard(card.id)}
-                      disabled={!canAct || card.used}
+                      disabled={!canPlaySpecificSideCard(card)}
                       aria-label={`Play side card ${card.label}`}
                       title={`Play ${card.label}`}
                     >
@@ -1083,7 +1169,7 @@ export function LocalPracticeGame({ username, difficulty, opponentId, onExit }: 
               <ul className="local-game__stats-list">
                 <li><span>Match W-L</span><strong>{stats.matchesWon}-{stats.matchesLost}</strong></li>
                 <li><span>Win Rate</span><strong>{toPercent(stats.matchesWon, stats.matchesPlayed)}</strong></li>
-                <li><span>Rounds W-L</span><strong>{stats.roundsWon}-{stats.roundsLost}</strong></li>
+                <li><span>Sets W-L</span><strong>{stats.roundsWon}-{stats.roundsLost}</strong></li>
                 <li><span>Perfect 20s</span><strong>{stats.perfect20s}</strong></li>
                 <li><span>Vs {opponentProfile.name}</span><strong>{opponentStats.won}-{opponentStats.lost}</strong></li>
               </ul>
@@ -1092,8 +1178,9 @@ export function LocalPracticeGame({ username, difficulty, opponentId, onExit }: 
         </section>
 
         <section className="local-game__actions">
-          <button data-testid="draw-btn" className="btn btn--primary" onClick={() => drawFor("human")} disabled={!canAct}>Draw</button>
-          <button data-testid="stand-btn" className="btn btn--secondary" onClick={humanStand} disabled={!canAct}>Stand</button>
+          <button data-testid="draw-btn" className="btn btn--primary" onClick={() => drawFor("human")} disabled={!canDraw}>Draw</button>
+          <button data-testid="stand-btn" className="btn btn--secondary" onClick={humanStand} disabled={!canStand}>Stand</button>
+          <button className="btn btn--secondary" onClick={humanEndTurn} disabled={!canEndTurn}>End Turn</button>
           {phase === "game_end" ? (
             <span className="local-game__result">
               <strong>Winner: {winner}</strong>
@@ -1115,6 +1202,7 @@ export function LocalPracticeGame({ username, difficulty, opponentId, onExit }: 
         <div className="local-game__shortcuts" aria-label="Keyboard shortcuts">
           <kbd>D</kbd> Draw
           <kbd>S</kbd> Stand
+          <kbd>E</kbd> End turn
           <kbd>1</kbd>–<kbd>0</kbd> Side card
           <kbd>M</kbd> Sound
           <kbd>N</kbd> Music

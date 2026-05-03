@@ -5,6 +5,7 @@ import {
   ModalBuilder,
   PermissionFlagsBits,
   SlashCommandBuilder,
+  SlashCommandSubcommandGroupBuilder,
   type ButtonInteraction,
   type ChatInputCommandInteraction,
   type MessageEditOptions,
@@ -16,7 +17,7 @@ import {
   type StringSelectMenuInteraction,
 } from "discord.js";
 
-import { loadPazaakBotConfig } from "@openkotor/config";
+import { loadPazaakBotConfig, loadResearchWizardRuntimeConfig, loadSharedAiConfig } from "@openkotor/config";
 import { createBotClient, createLogger, deployGuildCommands, toErrorMessage } from "@openkotor/core";
 import { asBulletList, buildErrorEmbed, buildInfoEmbed, buildSuccessEmbed, buildWarningEmbed } from "@openkotor/discord-ui";
 import {
@@ -26,16 +27,21 @@ import {
   JsonPazaakMatchHistoryRepository,
   JsonPazaakMatchmakingQueueRepository,
   JsonPazaakSideboardRepository,
+  JsonTraskQueryRepository,
   JsonWalletRepository,
   resolveDataFile,
   type RivalryRecord,
 } from "@openkotor/persistence";
 import { personaProfiles } from "@openkotor/personas";
+import { createDefaultSearchProvider } from "@openkotor/retrieval";
+import { createResearchWizardClient } from "@openkotor/trask";
+import { normalizeCardGameType } from "@openkotor/platform";
 
 import {
   CUSTOM_SIDE_DECK_LABEL,
   PazaakCoordinator,
   canonicalTslSideDecks,
+  getDefaultPazaakOpponentForAdvisorDifficulty,
   getCanonicalSideDeckDefinition,
   isCanonicalSideDeckSupported,
   getCurrentPlayer,
@@ -52,6 +58,8 @@ import {
   normalizeSideDeckToken,
   WIN_SCORE,
   SIDE_DECK_SIZE,
+  assertCustomSideDeckTokenLimits,
+  getCustomSideDeckLimitErrors,
   type AdvisorAlternative,
   type AdvisorDifficulty,
   type AdvisorSnapshot,
@@ -61,22 +69,53 @@ import {
   type PendingChallenge,
   type SideCard,
   type SideDeckChoice,
+  PAZAAK_RULEBOOK,
+  getCardReference,
+  getBustProbabilityFromTable,
+  type RulebookCardEntry,
+  STARTER_TOKEN_GRANT,
+  pickDailyCommonDrop,
+  pickWinStreakBonusToken,
+  rollCrateContents,
 } from "./pazaak.js";
+import { buildMatchMilestoneUpdates } from "./milestone-grants.js";
 import { MatchStore } from "./match-store.js";
 import { createApiServer } from "./api-server.js";
+import {
+  buildAdminTournamentSubcommandGroup,
+  buildTournamentSubcommandGroup,
+  PazaakTournamentController,
+} from "./tournaments.js";
 
 const logger = createLogger("pazaak-bot");
 const config = loadPazaakBotConfig();
 const accountRepository = new JsonPazaakAccountRepository(resolveDataFile(config.dataDir, "accounts.json"));
-const walletRepository = new JsonWalletRepository(resolveDataFile(config.dataDir, "wallets.json"), config.startingCredits);
+const walletRepository = new JsonWalletRepository(resolveDataFile(config.dataDir, "wallets.json"), config.startingCredits, STARTER_TOKEN_GRANT);
 const sideboardRepository = new JsonPazaakSideboardRepository(resolveDataFile(config.dataDir, "custom-sideboards.json"));
 const matchmakingQueueRepository = new JsonPazaakMatchmakingQueueRepository(resolveDataFile(config.dataDir, "matchmaking-queue.json"));
 const lobbyRepository = new JsonPazaakLobbyRepository(resolveDataFile(config.dataDir, "lobbies.json"));
 const matchHistoryRepository = new JsonPazaakMatchHistoryRepository(resolveDataFile(config.dataDir, "match-history.json"));
-const matchStore = new MatchStore(config.dataDir);
+const traskQueryRepository = new JsonTraskQueryRepository(resolveDataFile(config.dataDir, "trask-queries.json"));
+const traskSearchProvider = createDefaultSearchProvider({ stateDir: process.env.INGEST_STATE_DIR?.trim() || "data/ingest-worker" });
+const traskResearchWizard = createResearchWizardClient(loadResearchWizardRuntimeConfig(), loadSharedAiConfig());
+const cardWorldBotGameType = normalizeCardGameType(process.env.CARDWORLD_BOT_GAME_TYPE?.trim(), "pazaak");
+const pazaakRequiresOwnershipProof = (process.env.CARDWORLD_REQUIRE_CHITIN_KEY?.trim() ?? "1") !== "0";
+const workerSyncUrl = process.env.PAZAAK_WORKER_SYNC_URL?.trim();
+const workerSyncSecret = process.env.PAZAAK_BOT_SYNC_SECRET?.trim();
+const matchDualWrite =
+  config.opsPolicy.features.dualWriteMatchesToWorker && workerSyncUrl && workerSyncSecret
+    ? { workerBaseUrl: workerSyncUrl, syncSecret: workerSyncSecret }
+    : undefined;
+const matchStore = new MatchStore(config.dataDir, matchDualWrite);
 const coordinator = new PazaakCoordinator(matchStore, {
-  turnTimeoutMs: config.turnTimerSeconds * 1000,
+  turnTimeoutMs: config.turnTimeoutMs,
   disconnectForfeitMs: config.disconnectForfeitMs,
+});
+const tournamentController = new PazaakTournamentController({
+  coordinator,
+  walletRepository,
+  dataFile: resolveDataFile(config.dataDir, "tournaments.json"),
+  logger,
 });
 const runtimeTslDecks = canonicalTslSideDecks.filter((deck) => deck.supported && deck.id >= 10);
 const runtimeTslDifficultyLabels: Readonly<Record<number, string>> = {
@@ -119,14 +158,79 @@ const sideboardTokenDescriptions: Readonly<Record<string, string>> = {
   "*4": "Flip plus/minus 4",
   "*5": "Flip plus/minus 5",
   "*6": "Flip plus/minus 6",
-  "$$": "Copy previous",
-  TT: "Tiebreaker",
-  F1: "Flip 2&4",
-  F2: "Flip 3&6",
-  VV: "Value change",
+  "$$": "D: copy the previous resolved board card",
+  TT: "±1T: choose +1 or -1 and win exact ties this set",
+  F1: "2&4: flip all visible 2s and 4s",
+  F2: "3&6: flip all visible 3s and 6s",
+  VV: "1±2: choose +1, +2, -1, or -2",
 };
 
 const formatSideboardTokens = (tokens: readonly string[]): string => tokens.join(" ");
+
+const normalizeOwnedSideDeckTokens = (tokens: readonly string[] | undefined): string[] => {
+  return (tokens ?? []).flatMap((token) => {
+    if (typeof token !== "string") {
+      return [];
+    }
+
+    const normalized = normalizeSideDeckToken(token);
+    return normalized ? [normalized] : [];
+  });
+};
+
+const countSideDeckTokens = (tokens: readonly string[]): Map<string, number> => {
+  const counts = new Map<string, number>();
+
+  for (const token of tokens) {
+    counts.set(token, (counts.get(token) ?? 0) + 1);
+  }
+
+  return counts;
+};
+
+const buildMissingOwnedTokenMessage = (tokens: readonly string[], ownedTokens: readonly string[]): string => {
+  const requestedCounts = countSideDeckTokens(tokens);
+  const ownedCounts = countSideDeckTokens(ownedTokens);
+  const missing: string[] = [];
+
+  for (const [token, requestedCount] of requestedCounts.entries()) {
+    const ownedCount = ownedCounts.get(token) ?? 0;
+
+    if (ownedCount < requestedCount) {
+      missing.push(`${token} x${requestedCount - ownedCount}`);
+    }
+  }
+
+  return missing.length > 0
+    ? `This sideboard uses locked cards. Missing unlocks: ${missing.join(", ")}.`
+    : "This sideboard uses cards you have not unlocked yet.";
+};
+
+const assertUnlockedSideboardSelection = async (userId: string, displayName: string, tokens: readonly string[]): Promise<string[]> => {
+  const wallet = await walletRepository.getWallet(userId, displayName);
+  const ownedTokens = normalizeOwnedSideDeckTokens(wallet.ownedSideDeckTokens);
+  const requestedCounts = countSideDeckTokens(tokens);
+  const ownedCounts = countSideDeckTokens(ownedTokens);
+
+  for (const [token, requestedCount] of requestedCounts.entries()) {
+    if ((ownedCounts.get(token) ?? 0) < requestedCount) {
+      throw new Error(buildMissingOwnedTokenMessage(tokens, ownedTokens));
+    }
+  }
+
+  return ownedTokens;
+};
+
+const buildOwnedTokenSummary = (ownedTokens: readonly string[]): string => {
+  if (ownedTokens.length === 0) {
+    return "None unlocked yet.";
+  }
+
+  return [...countSideDeckTokens(ownedTokens).entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([token, count]) => `${token} x${count}`)
+    .join(" ");
+};
 
 const resolveGameUserId = (legacyGameUserId: string | null, accountId: string): string => legacyGameUserId ?? accountId;
 
@@ -194,7 +298,7 @@ const parseCustomSideboardTokens = (input: string): string[] => {
     throw new Error(`Custom sideboards must contain exactly ${SIDE_DECK_SIZE} tokens.`);
   }
 
-  return rawTokens.map((token) => {
+  const tokens = rawTokens.map((token) => {
     const normalized = normalizeSideDeckToken(token);
 
     if (!normalized) {
@@ -203,10 +307,12 @@ const parseCustomSideboardTokens = (input: string): string[] => {
 
     return normalized;
   });
+
+  assertCustomSideDeckTokenLimits(tokens);
+  return tokens;
 };
 
 const buildDeckSelectionDescription = (
-  savedDeckId?: number,
   savedCustomSideboardNames: readonly string[] = [],
 ): string => {
   const extras = [
@@ -215,18 +321,17 @@ const buildDeckSelectionDescription = (
         ? `use your saved ${CUSTOM_SIDE_DECK_LABEL.toLowerCase()} (${formatSideboardName(savedCustomSideboardNames[0]!)})`
         : `choose from your saved ${CUSTOM_SIDE_DECK_LABEL.toLowerCase()}s`
       : null,
-    savedDeckId !== undefined ? `use your saved preset ${formatDeckDisplayName(savedDeckId)}` : null,
   ].filter((fragment): fragment is string => Boolean(fragment));
 
   if (extras.length === 0) {
-    return "Pick your own sideboard before the match starts, or leave it on Auto for a random supported runtime deck.";
+    return `Pick one of your saved ${CUSTOM_SIDE_DECK_LABEL.toLowerCase()}s before the match starts.`;
   }
 
   if (extras.length === 1) {
-    return `Pick your own sideboard before the match starts, ${extras[0]}, or leave it on Auto for a random supported runtime deck.`;
+    return `Pick your own sideboard before the match starts, ${extras[0]}.`;
   }
 
-  return `Pick your own sideboard before the match starts, ${extras[0]}, ${extras[1]}, or leave it on Auto for a random supported runtime deck.`;
+  return `Pick your own sideboard before the match starts, ${extras.join(" and ")}.`;
 };
 
 const normalizeSideboardSearchQuery = (query?: string): string | undefined => {
@@ -316,6 +421,12 @@ const sideCardToToken = (card: SideCard): string => {
       return "F2";
     case "value_change":
       return "VV";
+    case "mod_previous":
+      return `%${card.value}`;
+    case "halve_previous":
+      return "/2";
+    case "hard_reset":
+      return "00";
   }
 };
 
@@ -335,7 +446,45 @@ const getRematchDeckSeed = (player: MatchPlayerState): { deckId?: number; custom
 const pazaakCommand = new SlashCommandBuilder()
   .setName("pazaak")
   .setDescription("Pazaak Bot runs a fake-credit pazaak table.")
-  .addSubcommand((subcommand) => subcommand.setName("rules").setDescription("Explain the current pazaak ruleset."))
+  .addSubcommand((subcommand) =>
+    subcommand
+      .setName("rules")
+      .setDescription("Explain the current pazaak ruleset (Basics / Cards / Strategy / Modes / Tournaments).")
+      .addStringOption((option) =>
+        option
+          .setName("section")
+          .setDescription("Jump directly to a rulebook section.")
+          .setRequired(false)
+          .addChoices(
+            { name: "Basics", value: "basics" },
+            { name: "Cards", value: "cards" },
+            { name: "Strategy", value: "strategy" },
+            { name: "Game Modes", value: "modes" },
+            { name: "Tournaments", value: "tournaments" },
+          ),
+      ),
+  )
+  .addSubcommand((subcommand) =>
+    subcommand
+      .setName("card")
+      .setDescription("Look up a single pazaak card by its side-deck token (e.g. +3, *2, $$, %4, /2, 00).")
+      .addStringOption((option) =>
+        option.setName("token").setDescription("Side-deck token to inspect.").setRequired(true),
+      ),
+  )
+  .addSubcommand((subcommand) =>
+    subcommand
+      .setName("strategy")
+      .setDescription("Show the subtract-first doctrine and bust probability chart.")
+      .addIntegerOption((option) =>
+        option
+          .setName("total")
+          .setDescription("Optional current board total to highlight on the bust probability chart.")
+          .setMinValue(0)
+          .setMaxValue(20)
+          .setRequired(false),
+      ),
+  )
   .addSubcommand((subcommand) => subcommand.setName("decks").setDescription("List the supported canonical sideboards and their ids."))
   .addSubcommand((subcommand) =>
     subcommand
@@ -427,6 +576,15 @@ const pazaakCommand = new SlashCommandBuilder()
             { name: "Hard", value: "hard" },
             { name: "Professional", value: "professional" },
           ),
+      )
+      .addStringOption((option) =>
+        option
+          .setName("mode")
+          .setDescription("Game mode for a new lobby. Wacky adds %N, /2, and 00 cards and forces ranked off.")
+          .addChoices(
+            { name: "Canonical TSL", value: "canonical" },
+            { name: "Wacky (%N, /2, 00)", value: "wacky" },
+          ),
       ),
   )
   .addSubcommand((subcommand) =>
@@ -462,26 +620,31 @@ const pazaakCommand = new SlashCommandBuilder()
           .setMinValue(1)
           .setMaxValue(5000);
       })
-      .addIntegerOption((option) => {
-        return option
-          .setName("deck")
-          .setDescription("Optional runtime TSL difficulty preset for your own sideboard.")
-          .setMinValue(10)
-          .setMaxValue(14)
-          .addChoices(...runtimeTslDeckChoices);
-      })
-      .addBooleanOption((option) => {
-        return option
-          .setName("use_custom")
-          .setDescription("Use your saved custom sideboard instead of a runtime TSL preset.");
-      })
       .addStringOption((option) => {
         return option
           .setName("custom_name")
           .setDescription("Optional saved custom sideboard name to use for this challenge.")
           .setRequired(false);
       });
-  });
+  })
+  .addSubcommandGroup(
+    new SlashCommandSubcommandGroupBuilder()
+      .setName("crate")
+      .setDescription("Open match-earned reward crates for bonus cards and credits.")
+      .addSubcommand((subcommand) =>
+        subcommand
+          .setName("open")
+          .setDescription("Consume one crate and reveal its contents.")
+          .addStringOption((option) =>
+            option
+              .setName("kind")
+              .setDescription("Crate tier to open.")
+              .setRequired(true)
+              .addChoices({ name: "Standard", value: "standard" }, { name: "Premium", value: "premium" }),
+          ),
+      ),
+  )
+  .addSubcommandGroup(buildTournamentSubcommandGroup());
 
 const pazaakAdminCommand = new SlashCommandBuilder()
   .setName("pazaak-admin")
@@ -528,43 +691,144 @@ const pazaakAdminCommand = new SlashCommandBuilder()
       .addIntegerOption((option) =>
         option.setName("amount").setDescription("How many credits to remove?").setRequired(true).setMinValue(1).setMaxValue(1_000_000),
       ),
-  );
+  )
+  .addSubcommandGroup(buildAdminTournamentSubcommandGroup());
 
-const buildRulesEmbed = () => {
+type RulesSection = "basics" | "cards" | "strategy" | "modes" | "tournaments";
+
+const RULES_SECTION_ORDER: readonly RulesSection[] = ["basics", "cards", "strategy", "modes", "tournaments"];
+
+const formatCardLine = (entry: RulebookCardEntry): string => {
+  const modeBadge = entry.gameMode === "wacky" ? " [Wacky]" : "";
+  const rarityBadge = entry.rarity === "rare" ? " (Gold)" : entry.rarity === "wacky_only" ? " (Wacky-only)" : "";
+  return `\`${entry.token}\` ${entry.displayLabel}${modeBadge}${rarityBadge} — ${entry.mechanic}`;
+};
+
+const buildRulesSectionEmbed = (section: RulesSection) => {
+  const book = PAZAAK_RULEBOOK;
+
+  switch (section) {
+    case "basics":
+      return buildInfoEmbed({
+        title: `${personaProfiles.pazaak.displayName} Rulebook — Basics`,
+        description: `First to ${book.deckLimits.setsToWin} sets wins; each set aims closer to ${book.deckLimits.winScore} without busting. The four-card hand lasts the whole match.`,
+        fields: book.basics.map((step) => ({ name: step.title, value: step.body, inline: false })),
+      });
+    case "cards": {
+      const canonical = book.cards.filter((card) => card.gameMode === "canonical");
+      const wacky = book.cards.filter((card) => card.gameMode === "wacky");
+      return buildInfoEmbed({
+        title: `${personaProfiles.pazaak.displayName} Rulebook — Card Reference`,
+        description: `Canonical sideboards hold up to ${book.deckLimits.standardTokenLimit} of any regular token and ${book.deckLimits.specialTokenLimit} of any gold/special token. Use \`/pazaak card <token>\` for a deep dive on a single card.`,
+        fields: [
+          { name: "Canonical cards", value: asBulletList(canonical.map(formatCardLine)).slice(0, 1024), inline: false },
+          { name: "Wacky-only cards", value: asBulletList(wacky.map(formatCardLine)).slice(0, 1024), inline: false },
+        ],
+      });
+    }
+    case "strategy":
+      return buildInfoEmbed({
+        title: `${personaProfiles.pazaak.displayName} Rulebook — Strategy`,
+        description: "Subtract-first doctrine, flip-over-plus preference, and exact-20 finishing lines. Use `/pazaak strategy total:<N>` to highlight your current bust odds.",
+        fields: book.strategy.map((note) => ({ name: note.title, value: note.body, inline: false })),
+      });
+    case "modes":
+      return buildInfoEmbed({
+        title: `${personaProfiles.pazaak.displayName} Rulebook — Game Modes`,
+        description: "Ranked and matchmaking always play canonical. Private lobbies can opt into Wacky mode via `/pazaak lobby action:create mode:wacky`.",
+        fields: book.gameModes.map((mode) => ({ name: mode.title, value: `${mode.summary}\n\n${mode.contract}`, inline: false })),
+      });
+    case "tournaments":
+      return buildInfoEmbed({
+        title: `${personaProfiles.pazaak.displayName} Rulebook — Tournaments`,
+        description: "Single-elim, double-elim, and Swiss formats. Seeding follows MMR and every match is persisted to tournaments.json.",
+        fields: [
+          { name: "Create", value: "`/pazaak tournament create` spins up an event with your chosen format, max seats, and sets-to-win length.", inline: false },
+          { name: "Enter", value: "`/pazaak tournament join` registers your seat. `/pazaak tournament leave` withdraws before the bracket locks.", inline: false },
+          { name: "Play", value: "When the tournament starts, the bot auto-schedules matches through PazaakCoordinator and the result settles the round automatically.", inline: false },
+          { name: "Admin", value: "Moderators use `/pazaak-admin tournament` to force-report or reseed when a participant goes missing.", inline: false },
+        ],
+      });
+  }
+};
+
+const buildRulesEmbed = (section: RulesSection = "basics") => buildRulesSectionEmbed(section);
+
+const buildRulesSelectMenu = (activeSection: RulesSection) => {
+  const menu = new StringSelectMenuBuilder()
+    .setCustomId("pazaak:rulesnav")
+    .setPlaceholder("Jump to rulebook section…");
+  for (const section of RULES_SECTION_ORDER) {
+    const label = section === "basics" ? "Basics" : section === "cards" ? "Cards" : section === "strategy" ? "Strategy" : section === "modes" ? "Game Modes" : "Tournaments";
+    menu.addOptions({ label, value: section, default: section === activeSection });
+  }
+  return new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(menu);
+};
+
+const buildCardReferenceEmbed = (rawToken: string) => {
+  const normalized = normalizeSideDeckToken(rawToken);
+  const entry = normalized ? getCardReference(normalized) : undefined;
+  if (!entry) {
+    return buildErrorEmbed({
+      title: "Unknown card",
+      description: `Could not resolve token \`${rawToken}\`. Canonical tokens include +1..+6, -1..-6, *1..*6, VV, $$, TT, F1, F2. Wacky tokens are %3, %4, %5, %6, /2, 00.`,
+    });
+  }
+
+  const modeBadge = entry.gameMode === "wacky" ? " (Wacky)" : "";
+  const rarity = entry.rarity === "starter"
+    ? "Starter"
+    : entry.rarity === "common"
+      ? "Common"
+      : entry.rarity === "uncommon"
+        ? "Uncommon"
+        : entry.rarity === "rare"
+          ? "Rare / Gold"
+          : "Wacky-only";
+
+  const fields = [
+    { name: "Token", value: `\`${entry.token}\` (${entry.displayLabel}${entry.canonicalTslLabel ? `, TSL: ${entry.canonicalTslLabel}` : ""})`, inline: true },
+    { name: "Rarity", value: `${rarity} · Sideboard limit ${entry.sideboardLimit}`, inline: true },
+    { name: "Tier score", value: `${entry.tierScore}/100`, inline: true },
+    { name: "Mechanic", value: entry.mechanic, inline: false },
+    { name: "When to use", value: entry.whenToUse, inline: false },
+  ];
+  if (entry.tslNotes) {
+    fields.push({ name: "TSL notes", value: entry.tslNotes, inline: false });
+  }
+
   return buildInfoEmbed({
-    title: `${personaProfiles.pazaak.displayName} Explains The Rules`,
-    description: "Look, these are the KOTOR-flavored house rules on this table. Try not to laugh if I lose again.",
+    title: `${entry.displayLabel}${modeBadge}`,
+    description: entry.gameMode === "wacky" ? "Wacky-mode card. Rejected by canonical or ranked lobbies." : "Canonical TSL card. Legal in every mode.",
+    fields,
+  });
+};
+
+const buildStrategyEmbed = (highlightTotal?: number | null) => {
+  const deckLimits = PAZAAK_RULEBOOK.deckLimits;
+  const chartRows: string[] = [];
+  for (let total = 0; total <= 20; total += 1) {
+    const probability = deckLimits.bustProbabilityTable[total] ?? 0;
+    const percent = Math.round(probability * 100);
+    const marker = total === highlightTotal ? "→" : " ";
+    const bar = percent === 0 ? "—" : "█".repeat(Math.max(1, Math.round(percent / 5)));
+    chartRows.push(`${marker} ${String(total).padStart(2, " ")}: ${bar} ${percent}%`);
+  }
+
+  const strategyField = PAZAAK_RULEBOOK.strategy
+    .slice(0, 3)
+    .map((note) => `**${note.title}** — ${note.body}`)
+    .join("\n\n");
+
+  return buildInfoEmbed({
+    title: `${personaProfiles.pazaak.displayName} Strategy Primer`,
+    description: "Core strategy and next-draw bust odds against a fresh 40-card shoe.",
     fields: [
-      {
-        name: "Match Flow",
-        value: asBulletList([
-          `Each match is first to ${SETS_TO_WIN} sets.`,
-          `Each set aims to get closer to ${WIN_SCORE} without going over.`,
-          "A tie starts another set with fresh side cards — unless one player has a Tiebreaker card.",
-          "The loser of a set goes first in the next set. On a tie, the coin-flip opener resumes.",
-        ]),
-        inline: false,
-      },
-      {
-        name: "Decks",
-        value: asBulletList([
-          "The main deck contains four copies of cards 1 through 10.",
-          `Each player gets a ${SIDE_DECK_SIZE}-card canonical TSL sideboard at match start.`,
-          `${HAND_SIZE} side cards are drawn from the sideboard each set.`,
-          "Side cards include fixed (+/−), flip (±), the VV value-change card (±1/±2), the D copy card, sign-selectable Tiebreaker (±1T), and board-flip specials (Flip 2&4, Flip 3&6).",
-        ]),
-        inline: false,
-      },
-      {
-        name: "Turns",
-        value: asBulletList([
-          "On your turn, you must draw from the main deck first.",
-          `If the draw puts you over ${WIN_SCORE}, you bust and lose the set immediately.`,
-          "If you don't bust, you may play one side card, then stand or end the turn.",
-          `Filling all ${MAX_BOARD_SIZE} board slots without busting wins the set automatically.`,
-        ]),
-        inline: false,
-      },
+      { name: "Doctrine", value: strategyField, inline: false },
+      { name: "Bust probability table", value: `\`\`\`\n${chartRows.join("\n")}\n\`\`\``, inline: false },
+      ...(typeof highlightTotal === "number"
+        ? [{ name: `Your total: ${highlightTotal}`, value: `Next-draw bust probability: ${Math.round((getBustProbabilityFromTable(highlightTotal)) * 100)}%`, inline: false }]
+        : []),
     ],
   });
 };
@@ -585,7 +849,7 @@ const buildDeckCatalogEmbed = () => {
       },
       {
         name: "Token Legend",
-        value: "+/- = fixed value | * = flip sign | $$ = copy previous | TT = +/-1T | F1 = Flip 2&4 | F2 = Flip 3&6 | VV = +/-1 or +/-2",
+        value: "+/- = fixed value | * = flip sign | $$ or D = copy previous | TT = +/-1T | F1 = 2&4 | F2 = 3&6 | VV = 1±2",
         inline: false,
       },
     ],
@@ -607,6 +871,11 @@ const buildWalletEmbed = async (userId: string, displayName: string) => {
       name: "Streak",
       value: `Current: ${wallet.streak}\nBest: ${wallet.bestStreak}`,
       inline: true,
+    },
+    {
+      name: "Reward crates",
+      value: `Standard: **${wallet.unopenedCratesStandard}** · Premium: **${wallet.unopenedCratesPremium}**\nOpen with \`/pazaak crate open\`.`,
+      inline: false,
     },
   ];
 
@@ -674,9 +943,16 @@ const buildDailyEmbed = async (userId: string, displayName: string) => {
     ? ` That's a **${multiplier}x streak bonus** on your ${wallet.wins}-win run.`
     : "";
 
+  const cardDrop = pickDailyCommonDrop();
+  let cardNote = "";
+  if (cardDrop) {
+    await walletRepository.addOwnedSideDeckTokens(userId, displayName, [cardDrop]);
+    cardNote = ` You also unlocked a bonus card: **${cardDrop}** (Common drop).`;
+  }
+
   return buildSuccessEmbed({
     title: "Daily Bonus Claimed",
-    description: `Pazaak Bot slides **${result.amount} credits** across the table.${bonusNote}`,
+    description: `Pazaak Bot slides **${result.amount} credits** across the table.${bonusNote}${cardNote}`,
   });
 };
 
@@ -773,6 +1049,7 @@ const buildPresetEmbed = async (userId: string, displayName: string) => {
 
 const buildSideboardEmbed = async (userId: string, displayName: string, searchQuery?: string) => {
   const sideboardState = await sideboardRepository.listSideboards(userId, displayName);
+  const wallet = await walletRepository.getWallet(userId, displayName);
   const activeSideboard = sideboardState.sideboards.find((sideboard) => sideboard.isActive);
   const filteredSideboards = filterSavedSideboards(sideboardState.sideboards, searchQuery);
   const normalizedQuery = normalizeSideboardSearchQuery(searchQuery);
@@ -805,6 +1082,11 @@ const buildSideboardEmbed = async (userId: string, displayName: string, searchQu
       {
         name: "Supported Tokens",
         value: supportedSideDeckTokens.join(" "),
+        inline: false,
+      },
+      {
+        name: "Unlocked Cards",
+        value: buildOwnedTokenSummary(normalizeOwnedSideDeckTokens(wallet.ownedSideDeckTokens)),
         inline: false,
       },
     ],
@@ -950,7 +1232,9 @@ const buildSideboardValidationSummary = (tokens: readonly string[]): string => {
   }, { fixed: 0, flip: 0, special: 0 });
 
   const uniqueCount = new Set(tokens).size;
-  return `All ${tokens.length} slots valid | Fixed: ${categoryCounts.fixed} | Flip: ${categoryCounts.flip} | Special: ${categoryCounts.special} | Unique tokens: ${uniqueCount}`;
+  const limitErrors = getCustomSideDeckLimitErrors(tokens);
+  const status = limitErrors.length > 0 ? `Needs edits: ${limitErrors.join(" ")}` : `All ${tokens.length} slots valid`;
+  return `${status} | Fixed: ${categoryCounts.fixed} | Flip: ${categoryCounts.flip} | Special: ${categoryCounts.special} | Unique tokens: ${uniqueCount}`;
 };
 
 const buildSideboardEditorEmbed = (tokens: readonly string[], page: number, sideboardName: string, selectedSlot?: number) => {
@@ -1102,7 +1386,6 @@ const buildChallengeComponents = (challenge: PendingChallenge) => {
 };
 
 const buildDeckSelectionEmbed = (
-  savedDeckId?: number,
   savedCustomSideboards: readonly { name: string; isActive: boolean }[] = [],
   searchQuery?: string,
 ) => {
@@ -1111,7 +1394,7 @@ const buildDeckSelectionEmbed = (
 
   return buildInfoEmbed({
     title: "Choose Your Deck",
-    description: buildDeckSelectionDescription(savedDeckId, savedCustomSideboards.map((sideboard) => sideboard.name)),
+    description: buildDeckSelectionDescription(savedCustomSideboards.map((sideboard) => sideboard.name)),
     fields: normalizedQuery
       ? [{
           name: "Custom Sideboard Search",
@@ -1126,39 +1409,11 @@ const buildDeckSelectionEmbed = (
 
 const buildDeckSelectionComponents = (
   challengeId: string,
-  savedDeckId?: number,
   savedCustomSideboards: readonly { name: string; isActive: boolean }[] = [],
   customPage = 0,
   searchQuery?: string,
 ) => {
-  const baseDeckOptions = [
-    {
-      label: "Auto",
-      value: "auto",
-      description: "Let the engine assign a supported canonical TSL deck.",
-    },
-    ...(savedDeckId !== undefined ? [{
-      label: `Saved Preset: ${formatDeckDisplayName(savedDeckId)}`,
-      value: `saved:${savedDeckId}`,
-      description: "Use your saved default runtime preset.",
-    }] : []),
-    ...runtimeTslDecks
-      .filter((deck) => deck.id !== savedDeckId)
-      .map((deck) => ({
-        label: formatDeckDisplayName(deck.id, deck.label),
-        value: String(deck.id),
-        description: "Runtime TSL match deck",
-      })),
-  ];
-
-  const rows: Array<ActionRowBuilder<StringSelectMenuBuilder> | ActionRowBuilder<ButtonBuilder>> = [
-    new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(
-      new StringSelectMenuBuilder()
-        .setCustomId(`pazaak:acceptdeck:${challengeId}`)
-        .setPlaceholder("Choose your sideboard before accepting")
-        .addOptions(baseDeckOptions.slice(0, MAX_DECK_SELECTION_OPTIONS)),
-    ),
-  ];
+  const rows: Array<ActionRowBuilder<StringSelectMenuBuilder> | ActionRowBuilder<ButtonBuilder>> = [];
 
   if (savedCustomSideboards.length > 0) {
     const filteredSideboards = filterSavedSideboards(savedCustomSideboards, searchQuery);
@@ -1227,6 +1482,17 @@ const buildDeckSelectionComponents = (
       buildActivityLobbyButton("Open Activity Lobby"),
     ),
   );
+
+  if (rows.length === 0) {
+    rows.push(
+      new ActionRowBuilder<ButtonBuilder>().addComponents(
+        new ButtonBuilder()
+          .setCustomId(`pazaak:acceptcustomsearch:${challengeId}:_`)
+          .setLabel("Find Saved Sideboard")
+          .setStyle(ButtonStyle.Secondary),
+      ),
+    );
+  }
 
   return rows;
 };
@@ -1551,7 +1817,8 @@ const buildPrivateControlsPayload = async (match: PazaakMatch, userId: string, a
   const handLine = renderHandLine(player) || "No side cards drawn.";
   const wallet = await walletRepository.getWallet(player.userId, player.displayName);
   const components: ActionRowBuilder<ButtonBuilder>[] = [];
-  const advisorSnapshot = getAdvisorSnapshotForPlayer(match, userId, advisorDifficulty);
+  const advisorEnabled = match.wager === 0;
+  const advisorSnapshot = advisorEnabled ? getAdvisorSnapshotForPlayer(match, userId, advisorDifficulty) : null;
 
   let description = `Balance: **${wallet.balance} credits**\nYour hand: ${handLine}`;
 
@@ -1565,28 +1832,24 @@ const buildPrivateControlsPayload = async (match: PazaakMatch, userId: string, a
     description = `${description}\n\n${opponent.displayName} is holding the turn right now. Try not to look shocked.`;
   } else if (match.phase === "turn") {
     description = `${description}\n\nIt is your move. Draw from the main deck.`;
-    components.push(
-      new ActionRowBuilder<ButtonBuilder>().addComponents(
-        new ButtonBuilder().setCustomId(`pazaak:draw:${match.id}:${advisorDifficulty}`).setLabel("Draw").setStyle(ButtonStyle.Primary),
-        buildAdvisorCycleButton(match.id, advisorDifficulty),
-      ),
-    );
+    components.push(new ActionRowBuilder<ButtonBuilder>().addComponents(
+      new ButtonBuilder().setCustomId(`pazaak:draw:${match.id}:${advisorDifficulty}`).setLabel("Draw").setStyle(ButtonStyle.Primary),
+      ...(advisorEnabled ? [buildAdvisorCycleButton(match.id, advisorDifficulty)] : []),
+    ));
   } else if (match.phase === "after-card") {
     description = `${description}\n\n${match.statusLine} Stand on ${player.total} or end the turn.`;
 
-    components.push(
-      new ActionRowBuilder<ButtonBuilder>().addComponents(
-        new ButtonBuilder()
-          .setCustomId(`pazaak:endturn:${match.id}:${advisorDifficulty}`)
-          .setLabel("End Turn")
-          .setStyle(ButtonStyle.Secondary),
-        new ButtonBuilder()
-          .setCustomId(`pazaak:stand:${match.id}:${advisorDifficulty}`)
-          .setLabel("Stand")
-          .setStyle(ButtonStyle.Secondary),
-        buildAdvisorCycleButton(match.id, advisorDifficulty),
-      ),
-    );
+    components.push(new ActionRowBuilder<ButtonBuilder>().addComponents(
+      new ButtonBuilder()
+        .setCustomId(`pazaak:endturn:${match.id}:${advisorDifficulty}`)
+        .setLabel("End Turn")
+        .setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder()
+        .setCustomId(`pazaak:stand:${match.id}:${advisorDifficulty}`)
+        .setLabel("Stand")
+        .setStyle(ButtonStyle.Secondary),
+      ...(advisorEnabled ? [buildAdvisorCycleButton(match.id, advisorDifficulty)] : []),
+    ));
   } else {
     description = `${description}\n\nYou drew ${match.pendingDraw}. Play a side card, stand on ${player.total}, or end the turn.`;
 
@@ -1597,19 +1860,17 @@ const buildPrivateControlsPayload = async (match: PazaakMatch, userId: string, a
         .setStyle(ButtonStyle.Success);
     });
 
-    components.push(
-      new ActionRowBuilder<ButtonBuilder>().addComponents(
-        new ButtonBuilder()
-          .setCustomId(`pazaak:endturn:${match.id}:${advisorDifficulty}`)
-          .setLabel("End Turn")
-          .setStyle(ButtonStyle.Secondary),
-        new ButtonBuilder()
-          .setCustomId(`pazaak:stand:${match.id}:${advisorDifficulty}`)
-          .setLabel("Stand")
-          .setStyle(ButtonStyle.Secondary),
-        buildAdvisorCycleButton(match.id, advisorDifficulty),
-      ),
-    );
+    components.push(new ActionRowBuilder<ButtonBuilder>().addComponents(
+      new ButtonBuilder()
+        .setCustomId(`pazaak:endturn:${match.id}:${advisorDifficulty}`)
+        .setLabel("End Turn")
+        .setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder()
+        .setCustomId(`pazaak:stand:${match.id}:${advisorDifficulty}`)
+        .setLabel("Stand")
+        .setStyle(ButtonStyle.Secondary),
+      ...(advisorEnabled ? [buildAdvisorCycleButton(match.id, advisorDifficulty)] : []),
+    ));
     components.push(...chunkButtons(sideCardButtons));
   }
 
@@ -1663,7 +1924,12 @@ const refreshBoardMessage = async (match: PazaakMatch): Promise<void> => {
     try {
       const message = await channel.messages.fetch(match.publicMessageId);
       await message.edit(payload);
-    } catch {
+    } catch (err) {
+      logger.warn("Failed to refresh public Pazaak board message.", {
+        matchId: match.id,
+        messageId: match.publicMessageId,
+        error: toErrorMessage(err),
+      });
       // Keep spectator mirrors alive even if the original match post disappears.
     }
   }
@@ -1690,13 +1956,25 @@ const settleCompletedMatch = async (match: PazaakMatch): Promise<void> => {
     return;
   }
 
-  await walletRepository.recordMatch({
+  const preWinner = await walletRepository.getWallet(match.winnerId, match.winnerName);
+  const preLoser = await walletRepository.getWallet(match.loserId, match.loserName);
+
+  const { winner } = await walletRepository.recordMatch({
     winnerId: match.winnerId,
     winnerName: match.winnerName,
     loserId: match.loserId,
     loserName: match.loserName,
     wager: match.wager,
   });
+
+  const loserWallet = await walletRepository.getWallet(match.loserId, match.loserName);
+  const milestoneUpdates = buildMatchMilestoneUpdates(preWinner, preLoser, winner, loserWallet);
+  await walletRepository.applyMatchProgressionDeltas(milestoneUpdates);
+
+  const streakBonus = pickWinStreakBonusToken(winner.streak);
+  if (streakBonus) {
+    await walletRepository.addOwnedSideDeckTokens(match.winnerId, match.winnerName, [streakBonus]);
+  }
   await matchHistoryRepository.append({
     matchId: match.id,
     channelId: match.channelId,
@@ -1709,9 +1987,21 @@ const settleCompletedMatch = async (match: PazaakMatch): Promise<void> => {
     summary: match.statusLine,
   });
   coordinator.markSettled(match.id);
+
+  try {
+    await tournamentController.onMatchSettled(match);
+  } catch (err) {
+    logger.error("Tournament settlement hook failed.", err instanceof Error ? err : { error: String(err) });
+  }
 };
 
 const handleAdminCommand = async (interaction: ChatInputCommandInteraction): Promise<void> => {
+  const subcommandGroup = interaction.options.getSubcommandGroup(false);
+  if (subcommandGroup === "tournament") {
+    await tournamentController.handleSubcommand(interaction, true);
+    return;
+  }
+
   const subcommand = interaction.options.getSubcommand(true);
   switch (subcommand) {
     case "challenge": {
@@ -1818,11 +2108,75 @@ const handleSlashCommand = async (interaction: ChatInputCommandInteraction): Pro
     return;
   }
 
+  const subcommandGroup = interaction.options.getSubcommandGroup(false);
+  if (subcommandGroup === "tournament") {
+    await tournamentController.handleSubcommand(interaction, false);
+    return;
+  }
+
+  if (subcommandGroup === "crate") {
+    const nested = interaction.options.getSubcommand(true);
+    if (nested === "open") {
+      const actor = await resolveCommandActor(interaction);
+      const kindRaw = interaction.options.getString("kind", true);
+      const kind = kindRaw === "premium" ? "premium" : "standard";
+      const rolled = rollCrateContents(kind);
+
+      try {
+        const wallet = await walletRepository.consumeCrateAndApplyDrops(actor.userId, actor.displayName, kind, rolled);
+        const cardLines = rolled.tokens.length > 0 ? rolled.tokens.join(", ") : "No bonus card this roll.";
+        await interaction.reply({
+          embeds: [
+            buildSuccessEmbed({
+              title: `${kind === "premium" ? "Premium" : "Standard"} crate opened`,
+              description: `**Cards:** ${cardLines}\n**Bonus credits:** +${rolled.bonusCredits}\n**Balance:** ${wallet.balance} · Standard crates left: **${wallet.unopenedCratesStandard}** · Premium: **${wallet.unopenedCratesPremium}**`,
+            }),
+          ],
+          ephemeral: true,
+        });
+      } catch (error) {
+        const status = typeof error === "object" && error !== null && "status" in error ? (error as { status?: number }).status : undefined;
+        await interaction.reply({
+          embeds: [
+            buildWarningEmbed({
+              title: "Cannot open crate",
+              description: status === 400
+                ? "You do not have any crates of that type. Win matches (and even losses grant consolation crates) to earn more."
+                : toErrorMessage(error),
+            }),
+          ],
+          ephemeral: true,
+        });
+      }
+    }
+    return;
+  }
+
   const subcommand = interaction.options.getSubcommand(true);
 
   switch (subcommand) {
     case "rules": {
-      await interaction.reply({ embeds: [buildRulesEmbed()] });
+      const sectionParam = interaction.options.getString("section") as RulesSection | null;
+      const section: RulesSection = sectionParam ?? "basics";
+      await interaction.reply({
+        embeds: [buildRulesEmbed(section)],
+        components: [buildRulesSelectMenu(section)],
+      });
+      return;
+    }
+
+    case "card": {
+      const token = interaction.options.getString("token", true);
+      await interaction.reply({ embeds: [buildCardReferenceEmbed(token)], ephemeral: true });
+      return;
+    }
+
+    case "strategy": {
+      const total = interaction.options.getInteger("total");
+      await interaction.reply({
+        embeds: [buildStrategyEmbed(total === null ? undefined : total)],
+        ephemeral: true,
+      });
       return;
     }
 
@@ -1869,6 +2223,7 @@ const handleSlashCommand = async (interaction: ChatInputCommandInteraction): Pro
 
       if (cards) {
         const tokens = parseCustomSideboardTokens(cards);
+        await assertUnlockedSideboardSelection(interaction.user.id, interaction.user.displayName, tokens);
         const savedSideboard = await sideboardRepository.saveSideboard(interaction.user.id, interaction.user.displayName, tokens, requestedName);
         const currentSideboards = await sideboardRepository.listSideboards(interaction.user.id, interaction.user.displayName);
         await interaction.reply({
@@ -2049,14 +2404,20 @@ const handleSlashCommand = async (interaction: ChatInputCommandInteraction): Pro
 
       if (action === "create") {
         const name = interaction.options.getString("name") ?? `${actor.displayName}'s Table`;
+        const requestedMode = interaction.options.getString("mode");
+        const gameMode: "canonical" | "wacky" = requestedMode === "wacky" ? "wacky" : "canonical";
         const lobby = await lobbyRepository.create({
           name,
           hostUserId: actor.userId,
           hostName: actor.displayName,
           maxPlayers: 2,
+          tableSettings: {
+            gameMode,
+            ranked: gameMode === "canonical",
+          },
         });
         await interaction.reply({
-          embeds: [buildSuccessEmbed({ title: "Lobby Created", description: `Created **${lobby.name}**. Lobby ID: ${lobby.id}` })],
+          embeds: [buildSuccessEmbed({ title: "Lobby Created", description: `Created **${lobby.name}** (${gameMode === "wacky" ? "Wacky mode" : "Canonical TSL"}). Lobby ID: ${lobby.id}` })],
           components: buildActivityLobbyComponents(),
           ephemeral: true,
         });
@@ -2150,12 +2511,18 @@ const handleSlashCommand = async (interaction: ChatInputCommandInteraction): Pro
 
     case "ai": {
       const difficulty = normalizeAiDifficulty(interaction.options.getString("difficulty"));
+      const opponent = getDefaultPazaakOpponentForAdvisorDifficulty(difficulty);
       const match = coordinator.createDirectMatch({
         channelId: interaction.channelId,
         challengerId: interaction.user.id,
         challengerName: interaction.user.displayName,
+        opponentDeck: {
+          tokens: [...opponent.sideDeckTokens],
+          label: `${opponent.name} Deck`,
+          enforceTokenLimits: true,
+        },
         opponentId: `ai:${interaction.user.id}:${Date.now()}`,
-        opponentName: `${difficulty[0]!.toUpperCase()}${difficulty.slice(1)} AI`,
+        opponentName: opponent.name,
         opponentAiDifficulty: difficulty,
       });
       await interaction.reply({ embeds: [buildMatchEmbed(match)], components: buildMatchComponents(match) });
@@ -2167,8 +2534,6 @@ const handleSlashCommand = async (interaction: ChatInputCommandInteraction): Pro
     case "challenge": {
       const opponent = interaction.options.getUser("opponent", true);
       const wager = interaction.options.getInteger("wager", true);
-      const explicitDeckId = interaction.options.getInteger("deck") ?? undefined;
-      const useCustom = interaction.options.getBoolean("use_custom") ?? false;
       const requestedCustomName = normalizeRequestedSideboardName(interaction.options.getString("custom_name") ?? undefined);
 
       if (opponent.bot) {
@@ -2199,42 +2564,22 @@ const handleSlashCommand = async (interaction: ChatInputCommandInteraction): Pro
 
       const challengerWallet = await walletRepository.getWallet(interaction.user.id, interaction.user.displayName);
       const challengedWallet = await walletRepository.getWallet(opponent.id, opponent.displayName);
-      const challengerSideboard = useCustom || requestedCustomName
-        ? await sideboardRepository.getSideboard(interaction.user.id, requestedCustomName)
-        : undefined;
-      const challengerDeckId = explicitDeckId ?? challengerWallet.preferredRuntimeDeckId ?? undefined;
+      const challengerSideboard = await sideboardRepository.getSideboard(interaction.user.id, requestedCustomName);
 
-      if (explicitDeckId !== undefined && (useCustom || requestedCustomName !== undefined)) {
-        await interaction.reply({
-          embeds: [buildErrorEmbed({
-            title: "Choose One Deck Source",
-            description: "Use either `deck` for a runtime TSL preset or a custom sideboard selection, not both.",
-          })],
-          ephemeral: true,
-        });
-        return;
-      }
-
-      if ((useCustom || requestedCustomName !== undefined) && !challengerSideboard) {
+      if (!challengerSideboard) {
         await interaction.reply({
           embeds: [buildErrorEmbed({
             title: "No Saved Sideboard",
             description: requestedCustomName
               ? `Save a custom sideboard named **${formatSideboardName(requestedCustomName)}** before challenging with it.`
-              : "Save a custom sideboard first with `/pazaak sideboard cards:...` before challenging with `use_custom:true`.",
+              : "Save and activate a custom sideboard first with `/pazaak sideboard cards:...` before starting a multiplayer match.",
           })],
           ephemeral: true,
         });
         return;
       }
 
-      if (!useCustom && challengerDeckId !== undefined && !isRuntimeTslDeckSupported(challengerDeckId)) {
-        await interaction.reply({
-          embeds: [buildErrorEmbed({ title: "Unsupported Deck", description: `Deck ${challengerDeckId} is not available in the public runtime TSL deck pool (10-14).` })],
-          ephemeral: true,
-        });
-        return;
-      }
+      await assertUnlockedSideboardSelection(interaction.user.id, interaction.user.displayName, challengerSideboard.tokens);
 
       if (challengerWallet.balance < wager) {
         await interaction.reply({
@@ -2266,10 +2611,7 @@ const handleSlashCommand = async (interaction: ChatInputCommandInteraction): Pro
         channelId: interaction.channelId,
         challengerId: interaction.user.id,
         challengerName: interaction.user.displayName,
-        ...((useCustom || requestedCustomName !== undefined) && challengerSideboard
-          ? { challengerCustomDeck: { tokens: challengerSideboard.tokens, label: buildCustomSideboardLabel(challengerSideboard.name) } }
-          : {}),
-        ...(!(useCustom || requestedCustomName !== undefined) && challengerDeckId !== undefined ? { challengerDeckId } : {}),
+        challengerCustomDeck: { tokens: challengerSideboard.tokens, label: buildCustomSideboardLabel(challengerSideboard.name), enforceTokenLimits: true },
         challengedId: opponent.id,
         challengedName: opponent.displayName,
         wager,
@@ -2350,12 +2692,10 @@ const handleButtonInteraction = async (interaction: ButtonInteraction): Promise<
         }
 
         if (challenge.challengedDeckId === undefined && challenge.challengedCustomDeck === undefined) {
-          const challengedWallet = await walletRepository.getWallet(interaction.user.id, interaction.user.displayName);
           const challengedSideboards = await sideboardRepository.listSideboards(interaction.user.id, interaction.user.displayName);
-          const savedDeckId = challengedWallet.preferredRuntimeDeckId ?? undefined;
           await interaction.reply({
-            embeds: [buildDeckSelectionEmbed(savedDeckId, challengedSideboards.sideboards)],
-            components: buildDeckSelectionComponents(challengeId, savedDeckId, challengedSideboards.sideboards),
+            embeds: [buildDeckSelectionEmbed(challengedSideboards.sideboards)],
+            components: buildDeckSelectionComponents(challengeId, challengedSideboards.sideboards),
             ephemeral: true,
           });
           return;
@@ -2402,15 +2742,12 @@ const handleButtonInteraction = async (interaction: ButtonInteraction): Promise<
         return;
       }
 
-      const challengedWallet = await walletRepository.getWallet(interaction.user.id, interaction.user.displayName);
       const challengedSideboards = await sideboardRepository.listSideboards(interaction.user.id, interaction.user.displayName);
-      const savedDeckId = challengedWallet.preferredRuntimeDeckId ?? undefined;
 
       await interaction.update({
-        embeds: [buildDeckSelectionEmbed(savedDeckId, challengedSideboards.sideboards, searchQuery)],
+        embeds: [buildDeckSelectionEmbed(challengedSideboards.sideboards, searchQuery)],
         components: buildDeckSelectionComponents(
           challengeId,
-          savedDeckId,
           challengedSideboards.sideboards,
           Number.isNaN(requestedPage) ? 0 : requestedPage,
           searchQuery,
@@ -2438,13 +2775,11 @@ const handleButtonInteraction = async (interaction: ButtonInteraction): Promise<
         throw new Error("Malformed custom sideboard clear payload.");
       }
 
-      const challengedWallet = await walletRepository.getWallet(interaction.user.id, interaction.user.displayName);
       const challengedSideboards = await sideboardRepository.listSideboards(interaction.user.id, interaction.user.displayName);
-      const savedDeckId = challengedWallet.preferredRuntimeDeckId ?? undefined;
 
       await interaction.update({
-        embeds: [buildDeckSelectionEmbed(savedDeckId, challengedSideboards.sideboards)],
-        components: buildDeckSelectionComponents(challengeId, savedDeckId, challengedSideboards.sideboards),
+        embeds: [buildDeckSelectionEmbed(challengedSideboards.sideboards)],
+        components: buildDeckSelectionComponents(challengeId, challengedSideboards.sideboards),
       });
       return;
     }
@@ -2786,6 +3121,16 @@ const handleStringSelectInteraction = async (interaction: StringSelectMenuIntera
 
   const action = parts[1];
 
+  if (action === "rulesnav") {
+    const selected = (interaction.values[0] ?? "basics") as RulesSection;
+    const section = (RULES_SECTION_ORDER as readonly string[]).includes(selected) ? selected : "basics";
+    await interaction.update({
+      embeds: [buildRulesEmbed(section)],
+      components: [buildRulesSelectMenu(section)],
+    });
+    return;
+  }
+
   if (action === "sideboardselect") {
     const requestedPage = Number(parts[2] ?? "0");
     const searchQuery = decodeSideboardSearchQuery(parts[3]);
@@ -2824,6 +3169,8 @@ const handleStringSelectInteraction = async (interaction: StringSelectMenuIntera
     const savedSideboard = await sideboardRepository.getSideboard(interaction.user.id);
     const tokens = getEffectiveSideboardTokens(savedSideboard?.tokens);
     tokens[slotIndex] = normalizedToken;
+    assertCustomSideDeckTokenLimits(tokens);
+    await assertUnlockedSideboardSelection(interaction.user.id, interaction.user.displayName, tokens);
     const updatedSideboard = await sideboardRepository.saveSideboard(interaction.user.id, interaction.user.displayName, tokens);
 
     await interaction.update({
@@ -2845,13 +3192,8 @@ const handleStringSelectInteraction = async (interaction: StringSelectMenuIntera
     throw new Error("Malformed deck selection payload.");
   }
 
-  const savedDeckMatch = /^saved:(\d+)$/.exec(selectedValue);
   const customDeckMatch = /^custom:(.+)$/u.exec(selectedValue);
-  const challengedDeckId = selectedValue === "auto" || customDeckMatch !== null
-    ? undefined
-    : (savedDeckMatch ? Number(savedDeckMatch[1]) : Number(selectedValue));
-
-  if (challengedDeckId !== undefined && (!Number.isInteger(challengedDeckId) || !isRuntimeTslDeckSupported(challengedDeckId))) {
+  if (!customDeckMatch) {
     throw new Error(`Unsupported challenged deck selection: ${selectedValue}`);
   }
 
@@ -2873,16 +3215,12 @@ const handleStringSelectInteraction = async (interaction: StringSelectMenuIntera
     throw new Error(`You no longer have a saved sideboard named ${customDeckMatch[1]}. Save it again with /pazaak sideboard first.`);
   }
 
-  const challengedDeckChoice: SideDeckChoice | undefined = customDeckMatch
-    ? { tokens: savedSideboard!.tokens, label: buildCustomSideboardLabel(savedSideboard!.name) }
-    : challengedDeckId;
+  await assertUnlockedSideboardSelection(interaction.user.id, interaction.user.displayName, savedSideboard!.tokens);
+
+  const challengedDeckChoice: SideDeckChoice | undefined = { tokens: savedSideboard!.tokens, label: buildCustomSideboardLabel(savedSideboard!.name), enforceTokenLimits: true };
 
   const match = await startAcceptedMatch(challenge, interaction.user.id, challengedDeckChoice);
-  const selectedDeckLabel = customDeckMatch
-    ? buildCustomSideboardLabel(savedSideboard!.name)
-    : challengedDeckId === undefined
-      ? "Auto"
-      : formatDeckDisplayName(challengedDeckId, getCanonicalSideDeckDefinition(challengedDeckId)?.label);
+  const selectedDeckLabel = buildCustomSideboardLabel(savedSideboard!.name);
 
   await interaction.update({
     embeds: [buildSuccessEmbed({
@@ -2924,13 +3262,11 @@ const handleModalSubmitInteraction = async (interaction: ModalSubmitInteraction)
         throw new Error("Malformed custom sideboard search modal payload.");
       }
 
-      const challengedWallet = await walletRepository.getWallet(interaction.user.id, interaction.user.displayName);
       const challengedSideboards = await sideboardRepository.listSideboards(interaction.user.id, interaction.user.displayName);
-      const savedDeckId = challengedWallet.preferredRuntimeDeckId ?? undefined;
 
       await interaction.reply({
-        embeds: [buildDeckSelectionEmbed(savedDeckId, challengedSideboards.sideboards, searchQuery)],
-        components: buildDeckSelectionComponents(challengeId, savedDeckId, challengedSideboards.sideboards, 0, searchQuery),
+        embeds: [buildDeckSelectionEmbed(challengedSideboards.sideboards, searchQuery)],
+        components: buildDeckSelectionComponents(challengeId, challengedSideboards.sideboards, 0, searchQuery),
         ephemeral: true,
       });
       return;
@@ -2948,6 +3284,7 @@ const handleModalSubmitInteraction = async (interaction: ModalSubmitInteraction)
     interaction.fields.getTextInputValue(SIDEBOARD_MODAL_SECOND_FIELD_ID),
   ].join(" "));
 
+  await assertUnlockedSideboardSelection(interaction.user.id, interaction.user.displayName, tokens);
   const savedSideboard = await sideboardRepository.saveSideboard(interaction.user.id, interaction.user.displayName, tokens);
   const currentSideboards = await sideboardRepository.listSideboards(interaction.user.id, interaction.user.displayName);
   await interaction.reply({
@@ -2994,7 +3331,7 @@ client.on("interactionCreate", async (interaction) => {
       await handleModalSubmitInteraction(interaction);
     }
   } catch (error) {
-    logger.error("Pazaak interaction failed.", error);
+    logger.error("Pazaak interaction failed.", error instanceof Error ? error : { error: String(error) });
 
     const payload = {
       embeds: [
@@ -3022,6 +3359,7 @@ const deployables = [
 ];
 await deployGuildCommands(config.discord, deployables, logger);
 await coordinator.initialize();
+await tournamentController.initialize();
 
 // Turn timer: auto-forfeit the active player if they stall longer than the timeout.
 // Runs every 60 seconds; also prunes stale match files once per hour (every 60th tick).
@@ -3035,10 +3373,10 @@ setInterval(() => {
       try {
         const forfeited = coordinator.forfeit(match.id, activePlayer.userId);
         settleCompletedMatch(forfeited).then(() => refreshBoardMessage(forfeited)).catch((err) => {
-          logger.error("Turn-timer board refresh failed.", err);
+          logger.error("Turn-timer board refresh failed.", err instanceof Error ? err : { error: String(err) });
         });
       } catch (err) {
-        logger.error("Turn-timer forfeit failed.", err);
+        logger.error("Turn-timer forfeit failed.", err instanceof Error ? err : { error: String(err) });
       }
     }
   }
@@ -3047,7 +3385,7 @@ setInterval(() => {
     matchStore.prune().then((removed) => {
       if (removed > 0) logger.info("Pruned stale match files.", { removed });
     }).catch((err) => {
-      logger.error("Match file prune failed.", err);
+      logger.error("Match file prune failed.", err instanceof Error ? err : { error: String(err) });
     });
   }
 }, 60_000);
@@ -3066,8 +3404,16 @@ const { listen: startApiServer } = createApiServer(coordinator, {
   matchmakingQueueRepository,
   lobbyRepository,
   matchHistoryRepository,
+  trask: {
+    searchProvider: traskSearchProvider,
+    researchWizard: traskResearchWizard,
+    queryRepository: traskQueryRepository,
+  },
+  botGameType: cardWorldBotGameType,
+  pazaakRequiresOwnershipProof,
   matchmakingTickMs: config.matchmakingTickMs,
   allowDevAuth: config.allowDevAuth,
+  opsPolicy: config.opsPolicy,
 });
 startApiServer();
 

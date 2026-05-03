@@ -12,6 +12,7 @@
     "build": "tsc -b"
   },
   "dependencies": {
+    "@openkotor/pazaak-policy": "workspace:*",
     "dotenv": "^16.4.7",
     "zod": "^3.24.4"
   }

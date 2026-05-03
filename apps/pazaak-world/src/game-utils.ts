@@ -3,8 +3,10 @@ import type { AdvisorAction, AdvisorCategory, AdvisorConfidence, AdvisorDifficul
 /** Mirrors getSideCardOptionsForPlayer from @openkotor/pazaak-engine (browser-safe). */
 export function getSideCardOptions(player: SerializedPlayerState): SideCardOption[] {
   const options: SideCardOption[] = [];
-  const previousBoardValue = player.board.at(-1)?.value ?? 0;
-  const previousBoardLabel = previousBoardValue === 0 ? "D" : `D (= ${previousBoardValue > 0 ? `+${previousBoardValue}` : `${previousBoardValue}`})`;
+  const previousBoardValue = player.board.at(-1)?.value;
+  const previousBoardLabel = previousBoardValue === undefined
+    ? "D"
+    : `D (= ${previousBoardValue > 0 ? `+${previousBoardValue}` : `${previousBoardValue}`})`;
 
   for (const card of player.hand) {
     if (player.usedCardIds.includes(card.id)) continue;
@@ -35,7 +37,9 @@ export function getSideCardOptions(player: SerializedPlayerState): SideCardOptio
         break;
 
       case "copy_previous":
-        options.push({ cardId: card.id, displayLabel: previousBoardLabel, appliedValue: previousBoardValue });
+        if (previousBoardValue !== undefined) {
+          options.push({ cardId: card.id, displayLabel: previousBoardLabel, appliedValue: previousBoardValue });
+        }
         break;
 
       case "tiebreaker":
@@ -96,7 +100,7 @@ export function getAdvisorSnapshot(
 
   const player = match.players.find((entry) => entry.userId === userId);
 
-  if (!player || player.stood || player.total > WIN_SCORE) {
+  if (!player || player.stood) {
     return null;
   }
 
@@ -112,7 +116,7 @@ export function getAdvisorSnapshot(
     return null;
   }
 
-  const matchContext = getAdvisorMatchContext(player, opponent);
+  const matchContext = getAdvisorMatchContext(player, opponent, match.setsToWin ?? SETS_TO_WIN);
 
   if (match.phase === "turn") {
     return {
@@ -142,6 +146,37 @@ export function getAdvisorSnapshot(
     category: option.category,
     score: option.score,
   }));
+
+  if (player.total > WIN_SCORE) {
+    if (match.phase === "after-draw" && bestOption) {
+      return {
+        recommendation: {
+          action: "play_side",
+          cardId: bestOption.option.cardId,
+          appliedValue: bestOption.option.appliedValue,
+          displayLabel: bestOption.option.displayLabel,
+          rationale: `${bestOption.rationale} You are currently over ${WIN_SCORE}, so this recovery has to happen before ending the turn.`,
+        },
+        difficulty,
+        category: "recovery",
+        confidence: "high",
+        bustProbability: 1,
+        alternatives,
+      };
+    }
+
+    return {
+      recommendation: {
+        action: "end_turn",
+        rationale: `No safe recovery card is available. Ending the turn confirms the bust at ${player.total}.`,
+      },
+      difficulty,
+      category: "recovery",
+      confidence: "high",
+      bustProbability: 1,
+      alternatives,
+    };
+  }
 
   if (match.phase === "after-draw" && player.board.length === MAX_BOARD_SIZE - 1 && bestOption) {
     return {
@@ -429,6 +464,10 @@ const shouldStandForAdvisor = (
   hasRecoveryOption: boolean,
   matchContext: AdvisorMatchContext,
 ): boolean => {
+  if (player.total > WIN_SCORE) {
+    return false;
+  }
+
   if (player.total >= WIN_SCORE) {
     return true;
   }
@@ -510,6 +549,10 @@ const buildEndTurnRationale = (
   bestOption: EvaluatedAdvisorOption | null,
   matchContext: AdvisorMatchContext,
 ): string => {
+  if (player.total > WIN_SCORE) {
+    return `End the turn only if you accept the bust. You are at ${player.total}, so a recovery side card is the only way out.`;
+  }
+
   if (opponent.stood && player.total < opponent.total) {
     return `End the turn if you want to keep pressing later. You still trail ${opponent.displayName}'s ${opponent.total}, so standing here would probably concede the set.`;
   }
@@ -541,9 +584,10 @@ const calculateBustProbability = (currentScore: number): number => {
 const getAdvisorMatchContext = (
   player: SerializedPlayerState,
   opponent: SerializedPlayerState,
+  setsToWin = SETS_TO_WIN,
 ): AdvisorMatchContext => ({
-  playerOnMatchPoint: player.roundWins >= SETS_TO_WIN - 1,
-  opponentOnMatchPoint: opponent.roundWins >= SETS_TO_WIN - 1,
+  playerOnMatchPoint: player.roundWins >= setsToWin - 1,
+  opponentOnMatchPoint: opponent.roundWins >= setsToWin - 1,
   leadingMatch: player.roundWins > opponent.roundWins,
   trailingMatch: player.roundWins < opponent.roundWins,
 });

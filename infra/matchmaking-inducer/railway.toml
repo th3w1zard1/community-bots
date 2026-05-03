@@ -1,0 +1,19 @@
+# Railway config-as-code for this service.
+#
+# Important: Railway only reads this file when it applies to the deployment.
+# Either:
+#   • Settings → Source → Root Directory = infra/matchmaking-inducer, or
+#   • Settings → Config-as-code → path = infra/matchmaking-inducer/railway.toml
+# Otherwise builds run from the repo root (pnpm workspace), Railpack finds no start
+# script, and you see "No start command detected".
+#
+# Variables: MATCHMAKING_UPSTREAM_URL (required); optional INDUCER_REGION / INDUCER_PROVIDER
+[build]
+# Must match Railway enum DOCKERFILE (see https://docs.railway.app/config-as-code/reference).
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+healthcheckPath = "/inducer/health"
+healthcheckTimeout = 30
+restartPolicyType = "ON_FAILURE"

@@ -8,6 +8,9 @@ export interface DiscordAuth {
   username: string;
   accountId?: string;
   accessToken: string;
+  instanceId?: string;
+  guildId?: string;
+  channelId?: string;
 }
 
 interface DiscordTokenResponse {
@@ -52,8 +55,41 @@ const parseDevAuth = (): DiscordAuth | null => {
     userId,
     username,
     accessToken,
+    ...withDefinedActivityContext({
+      instanceId: url.searchParams.get("devInstance")?.trim() || "dev-browser",
+      guildId: url.searchParams.get("devGuild")?.trim() || undefined,
+      channelId: url.searchParams.get("devChannel")?.trim() || undefined,
+    }),
   };
 };
+
+const configuredApiBases = String(import.meta.env.VITE_API_BASES ?? "")
+  .split(",")
+  .map((value: string) => value.trim())
+  .filter((value: string) => value.length > 0);
+
+function buildHostedUrl(path: string, base: string): string {
+  if (!base) return path;
+  return `${base.replace(/\/+$/u, "")}${path.startsWith("/") ? path : `/${path}`}`;
+}
+
+function resolveTokenExchangeUrl(): string {
+  const explicitBase = String(import.meta.env.VITE_ACTIVITY_TOKEN_BASE ?? "").trim();
+  const base = explicitBase || configuredApiBases[0] || "";
+  return buildHostedUrl("/api/auth/token", base);
+}
+
+function withDefinedActivityContext(context: {
+  instanceId?: string | undefined;
+  guildId?: string | undefined;
+  channelId?: string | undefined;
+}): Pick<DiscordAuth, "instanceId" | "guildId" | "channelId"> {
+  const result: Pick<DiscordAuth, "instanceId" | "guildId" | "channelId"> = {};
+  if (context.instanceId) result.instanceId = context.instanceId;
+  if (context.guildId) result.guildId = context.guildId;
+  if (context.channelId) result.channelId = context.channelId;
+  return result;
+}
 
 /**
  * Full Discord Embedded App SDK auth flow:
@@ -86,7 +122,7 @@ export async function initDiscordAuth(): Promise<DiscordAuth> {
   });
 
   // Step 2: Exchange the code for an access token via our API (keeps client_secret server-side).
-  const tokenRes = await fetch("/api/auth/token", {
+  const tokenRes = await fetch(resolveTokenExchangeUrl(), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ code }),
@@ -105,8 +141,13 @@ export async function initDiscordAuth(): Promise<DiscordAuth> {
   return {
     userId: tokenData.account?.legacyGameUserId ?? auth.user.id,
     username: tokenData.account?.displayName ?? auth.user.username,
-    accountId: tokenData.account?.accountId,
     accessToken: tokenData.app_token ?? tokenData.access_token,
+    ...(tokenData.account?.accountId ? { accountId: tokenData.account.accountId } : {}),
+    ...withDefinedActivityContext({
+      instanceId: sdk.instanceId ?? undefined,
+      guildId: sdk.guildId ?? undefined,
+      channelId: sdk.channelId ?? undefined,
+    }),
   };
 }
 

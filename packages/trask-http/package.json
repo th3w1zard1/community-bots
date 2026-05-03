@@ -1,0 +1,27 @@
+{
+  "name": "@openkotor/trask-http",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -b",
+    "test": "pnpm run build && node --test dist/*.test.js"
+  },
+  "dependencies": {
+    "@openkotor/persistence": "workspace:*",
+    "@openkotor/platform": "workspace:*",
+    "@openkotor/retrieval": "workspace:*",
+    "@openkotor/trask": "workspace:*",
+    "express": "^5.1.0"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.3",
+    "@types/supertest": "^6.0.3",
+    "supertest": "^7.1.4"
+  }
+}

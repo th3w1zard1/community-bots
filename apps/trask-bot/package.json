@@ -17,10 +17,21 @@
     "@openkotor/config": "workspace:*",
     "@openkotor/core": "workspace:*",
     "@openkotor/discord-ui": "workspace:*",
+    "@openkotor/persistence": "workspace:*",
     "@openkotor/personas": "workspace:*",
+    "@openkotor/platform": "workspace:*",
     "@openkotor/retrieval": "workspace:*",
+    "@openkotor/trask": "workspace:*",
+    "@openkotor/trask-http": "workspace:*",
+    "cookie-parser": "^1.4.7",
     "discord.js": "^14.26.2",
     "dotenv": "^16.4.7",
+    "express": "^5.1.0",
+    "jose": "^6.0.10",
     "openai": "^6.34.0"
+  },
+  "devDependencies": {
+    "@types/cookie-parser": "^1.4.8",
+    "@types/express": "^5.0.3"
   }
 }

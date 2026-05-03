@@ -1,0 +1,15 @@
+{
+  "name": "pazaak-matchmaking-worker",
+  "private": true,
+  "version": "0.1.0",
+  "dependencies": {
+    "@openkotor/pazaak-engine": "workspace:*",
+    "@openkotor/pazaak-policy": "workspace:*",
+    "@openkotor/pazaak-tournament": "workspace:*",
+    "@openkotor/platform": "workspace:*"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20250430.0",
+    "typescript": "^5.8.3"
+  }
+}

@@ -1,0 +1,273 @@
+:root {
+  color-scheme: dark;
+  --bg: #0c0e12;
+  --panel: #151922;
+  --border: #2a3142;
+  --text: #e8ecf4;
+  --muted: #9aa4b8;
+  --accent: #ff8c42;
+  --accent-dim: #c96d2e;
+  --warn-bg: #2a2218;
+  --warn-border: #6b4e2e;
+  font-family:
+    "Segoe UI",
+    system-ui,
+    sans-serif;
+  line-height: 1.5;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: radial-gradient(ellipse 120% 80% at 50% -20%, #1a2233 0%, var(--bg) 55%);
+  color: var(--text);
+}
+
+.wrap {
+  max-width: 56rem;
+  margin: 0 auto;
+  padding: 2.5rem 1.25rem 3rem;
+}
+
+.hero {
+  margin-bottom: 2rem;
+}
+
+.eyebrow {
+  margin: 0 0 0.35rem;
+  font-size: 0.75rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+h1 {
+  margin: 0 0 0.5rem;
+  font-size: clamp(2rem, 5vw, 2.75rem);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.lede {
+  margin: 0;
+  max-width: 42rem;
+  color: var(--muted);
+  font-size: 1.05rem;
+}
+
+.grid {
+  display: grid;
+  gap: 1rem;
+}
+
+@media (min-width: 640px) {
+  .grid {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .wide {
+    grid-column: 1 / -1;
+  }
+}
+
+.card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 1.25rem 1.35rem;
+}
+
+.card h2 {
+  margin: 0 0 0.75rem;
+  font-size: 1.1rem;
+  font-weight: 600;
+}
+
+.muted {
+  margin: 0 0 0.75rem;
+  color: var(--muted);
+  font-size: 0.92rem;
+}
+
+.muted code {
+  font-size: 0.85em;
+}
+
+.hidden {
+  display: none !important;
+}
+
+.callout {
+  margin: 0 0 1rem;
+  padding: 0.65rem 0.85rem;
+  border-radius: 8px;
+  font-size: 0.88rem;
+}
+
+.callout.warn {
+  background: var(--warn-bg);
+  border: 1px solid var(--warn-border);
+  color: #e9d5c4;
+}
+
+.actions {
+  margin: 0;
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.55rem 1.1rem;
+  border-radius: 8px;
+  font-weight: 600;
+  font-size: 0.95rem;
+  text-decoration: none;
+  border: 1px solid transparent;
+  transition:
+    background 0.15s,
+    border-color 0.15s;
+}
+
+.btn.primary {
+  background: var(--accent);
+  color: #140a05;
+  border-color: var(--accent-dim);
+}
+
+.btn.primary:hover {
+  filter: brightness(1.06);
+}
+
+.btn.ghost {
+  background: transparent;
+  color: var(--accent);
+  border-color: var(--border);
+}
+
+.btn.ghost:hover {
+  background: rgba(255, 140, 66, 0.08);
+  border-color: var(--accent-dim);
+}
+
+.hub-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 1.15rem;
+}
+
+.bot-panel-head h2 {
+  margin: 0 0 0.35rem;
+  font-size: 1.2rem;
+  font-weight: 600;
+}
+
+.bot-tagline {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.94rem;
+}
+
+.bot-tagline code {
+  font-size: 0.88em;
+}
+
+.bot-link-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 0.65rem;
+  margin: 1rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.bot-link-row li {
+  margin: 0;
+}
+
+.perm-foot {
+  margin: 0.65rem 0 0;
+  font-size: 0.82rem;
+}
+
+.perm-foot code {
+  font-size: 0.92em;
+}
+
+.hk-note {
+  margin: 0.45rem 0 0;
+  font-size: 0.8rem;
+}
+
+.hk-extra {
+  margin: 0.65rem 0 0;
+  font-size: 0.88rem;
+}
+
+.text-link {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.text-link:hover {
+  text-decoration: underline;
+}
+
+.hk-details {
+  margin-top: 1rem;
+  padding-top: 0.85rem;
+  border-top: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.hk-details summary {
+  cursor: pointer;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.hk-details .steps {
+  margin-top: 0.65rem;
+}
+
+.links {
+  margin: 0;
+  padding-left: 1.15rem;
+  color: var(--muted);
+}
+
+.links a {
+  color: var(--accent);
+}
+
+.links a:hover {
+  text-decoration: underline;
+}
+
+.steps {
+  margin: 0;
+  padding-left: 1.25rem;
+  color: var(--muted);
+}
+
+.steps code {
+  font-size: 0.88em;
+}
+
+.foot {
+  margin-top: 2rem;
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+
+.foot code {
+  font-size: 0.95em;
+}

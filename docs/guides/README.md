@@ -36,7 +36,7 @@ Pick which topics and pings you want to see on this server. Choose from 13 roles
 | `/designations assign` | Add one role |
 | `/designations remove` | Remove one role |
 
-[Full HK-86 guide →](hk-86.md)
+[Full HK-86 guide →](https://github.com/OpenKotOR/community-bots/wiki/docs/guides/hk-86)
 
 ---
 

@@ -1,0 +1,13 @@
+export { buildSocialAuthAuthorizeUrl, createObjectEnvLookup, DEFAULT_SOCIAL_AUTH_PROVIDER_ENV_MAP, fetchDiscordSocialAuthProfile, fetchGithubSocialAuthProfile, fetchGoogleSocialAuthProfile, listSocialAuthProviderConfigs, listSocialAuthProviders, PAZAAK_SOCIAL_AUTH_PROVIDER_ENV_MAP, resolveSocialAuthProviderConfig, SOCIAL_AUTH_PROVIDERS, type BuildSocialAuthAuthorizeUrlOptions, type EnvLookup, type FetchDiscordSocialAuthProfileOptions, type FetchGithubSocialAuthProfileOptions, type ResolveSocialAuthProviderConfigOptions, type SocialAuthAuthorizeUrlInput, type SocialAuthCodeExchangeConfig, type SocialAuthProfile, type SocialAuthProvider, type SocialAuthProviderConfig, type SocialAuthProviderEnvKeys, type SocialAuthProviderEnvMap, type SocialAuthProviderStatus, } from "./oauth.js";
+export { buildBrowserCorsAllowedOrigins, buildLocalWebOrigins, DEFAULT_LOCAL_WEB_PORTS, resolveCorsHeaders, type BuildBrowserCorsAllowedOriginsOptions, type CorsRequestLike, type CorsResolution, type CorsResolutionOptions, } from "./cors.js";
+export { CARD_GAME_TYPES, isCardGameType, normalizeCardGameType, type CardGameType, type CardWorldConfig, type UntrustedCardGameTypeInput, } from "./game-mode.js";
+export { createNodeApiHost, type NodeApiHost, type NodeApiHostOptions, } from "./node-http.js";
+export declare const DISCORD_API_V10 = "https://discord.com/api/v10";
+export declare const trimTrailingSlashes: (value: string) => string;
+export declare const normalizeOrigin: (value: string | undefined) => string | undefined;
+export declare const isLocalhostUrl: (value: string) => boolean;
+export declare const extractBearerToken: (authorization: string | null | undefined) => string | null;
+export declare const requireBearerToken: (authorization: string | null | undefined) => string;
+export declare const nowIso: () => string;
+export declare const plusDaysIso: (days: number) => string;
+export declare const isWebSocketUpgradeHeader: (value: string | null | undefined) => boolean;

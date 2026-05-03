@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile, readdir } from "node:fs/promises";
+import { mkdir, open, readFile, readdir, rename, rm, stat, utimes, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 export type SourceKind = "website" | "github" | "discord";
@@ -28,7 +28,168 @@ export interface SearchHit {
 export interface SearchProvider {
   listSources(): Promise<readonly SourceDescriptor[]>;
   search(query: string, limit?: number): Promise<readonly SearchHit[]>;
-  queueReindex(sourceIds?: readonly string[]): Promise<{ queuedSourceIds: readonly string[]; mode: "stub" }>;
+  queueReindex(sourceIds?: readonly string[]): Promise<{ queuedSourceIds: readonly string[]; mode: "file-queue" }>;
+}
+
+interface ReindexQueueState {
+  version: 1;
+  queuedSourceIds: string[];
+}
+
+const emptyReindexQueueState = (): ReindexQueueState => ({
+  version: 1,
+  queuedSourceIds: [],
+});
+
+export class FileReindexQueueStore {
+  private static readonly LOCK_TIMEOUT_MS = 5_000;
+  private static readonly LOCK_RETRY_MS = 50;
+  private static readonly LOCK_STALE_MS = 5 * 60_000;
+  private static readonly LOCK_HEARTBEAT_MS = 30_000;
+
+  public constructor(private readonly stateDir: string) {}
+
+  private queueFilePath(): string {
+    return path.join(this.stateDir, "reindex-queue.json");
+  }
+
+  private queueLockPath(): string {
+    return path.join(this.stateDir, "reindex-queue.lock");
+  }
+
+  private async withQueueLock<T>(work: () => Promise<T>): Promise<T> {
+    await mkdir(this.stateDir, { recursive: true });
+    const lockPath = this.queueLockPath();
+    const deadline = Date.now() + FileReindexQueueStore.LOCK_TIMEOUT_MS;
+
+    for (;;) {
+      try {
+        const lockHandle = await open(lockPath, "wx");
+        const heartbeat = setInterval(() => {
+          const now = new Date();
+          void utimes(lockPath, now, now).catch(() => {
+            // Ignore heartbeat failures; lock release/timeout handling remains authoritative.
+          });
+        }, FileReindexQueueStore.LOCK_HEARTBEAT_MS);
+        heartbeat.unref?.();
+
+        try {
+          return await work();
+        } finally {
+          clearInterval(heartbeat);
+          await lockHandle.close();
+          await rm(lockPath, { force: true });
+        }
+      } catch (error) {
+        const isLockContention =
+          typeof error === "object"
+          && error !== null
+          && "code" in error
+          && (error as { code?: string }).code === "EEXIST";
+
+        if (!isLockContention) {
+          throw error;
+        }
+
+        try {
+          const lockStats = await stat(lockPath);
+          const lockAgeMs = Date.now() - lockStats.mtimeMs;
+          if (lockAgeMs >= FileReindexQueueStore.LOCK_STALE_MS) {
+            await rm(lockPath, { force: true });
+            continue;
+          }
+        } catch {
+          // Lock disappeared between contention and inspection; just retry.
+        }
+
+        if (Date.now() >= deadline) {
+          throw new Error("Timed out waiting for reindex queue lock.");
+        }
+
+        await new Promise((resolve) => setTimeout(resolve, FileReindexQueueStore.LOCK_RETRY_MS));
+      }
+    }
+  }
+
+  private async loadState(): Promise<ReindexQueueState> {
+    const queuePath = this.queueFilePath();
+    let raw: string;
+
+    try {
+      raw = await readFile(queuePath, "utf8");
+    } catch (error) {
+      const code = typeof error === "object" && error !== null && "code" in error
+        ? (error as { code?: string }).code
+        : undefined;
+      if (code === "ENOENT") {
+        return emptyReindexQueueState();
+      }
+      throw error;
+    }
+
+    let parsed: Partial<ReindexQueueState>;
+    try {
+      parsed = JSON.parse(raw) as Partial<ReindexQueueState>;
+    } catch {
+      const quarantinePath = `${queuePath}.corrupt.${Date.now()}`;
+      await rename(queuePath, quarantinePath);
+      return emptyReindexQueueState();
+    }
+
+    if (parsed.version !== 1 || !Array.isArray(parsed.queuedSourceIds)) {
+      const quarantinePath = `${queuePath}.corrupt.${Date.now()}`;
+      await rename(queuePath, quarantinePath);
+      return emptyReindexQueueState();
+    }
+
+    return {
+      version: 1,
+      queuedSourceIds: parsed.queuedSourceIds
+        .map((entry) => String(entry).trim())
+        .filter((entry) => entry.length > 0),
+    };
+  }
+
+  private async saveState(state: ReindexQueueState): Promise<void> {
+    await mkdir(this.stateDir, { recursive: true });
+    const queuePath = this.queueFilePath();
+    const tempPath = `${queuePath}.${process.pid}.${Date.now()}.tmp`;
+    await writeFile(tempPath, JSON.stringify(state, null, 2), "utf8");
+    await rename(tempPath, queuePath);
+  }
+
+  public async enqueue(sourceIds: readonly string[]): Promise<readonly string[]> {
+    const normalizedIds = [...new Set(sourceIds.map((sourceId) => sourceId.trim()).filter((sourceId) => sourceId.length > 0))];
+    await this.withQueueLock(async () => {
+      const state = await this.loadState();
+      const queued = [...state.queuedSourceIds];
+      const queuedSet = new Set(queued);
+
+      for (const sourceId of normalizedIds) {
+        if (!queuedSet.has(sourceId)) {
+          queued.push(sourceId);
+          queuedSet.add(sourceId);
+        }
+      }
+
+      await this.saveState({
+        version: 1,
+        queuedSourceIds: queued,
+      });
+    });
+
+    return normalizedIds;
+  }
+
+  public async dequeueAll(): Promise<readonly string[]> {
+    return this.withQueueLock(async () => {
+      const state = await this.loadState();
+      const queued = [...state.queuedSourceIds];
+
+      await this.saveState(emptyReindexQueueState());
+      return queued;
+    });
+  }
 }
 
 const tokenize = (value: string): string[] => {
@@ -160,7 +321,10 @@ export const traskApprovedResearchSourceUrls: readonly string[] = traskApprovedR
 );
 
 export class StaticCatalogSearchProvider implements SearchProvider {
-  public constructor(private readonly sources: readonly SourceDescriptor[] = defaultSourceCatalog) {}
+  public constructor(
+    private readonly sources: readonly SourceDescriptor[] = defaultSourceCatalog,
+    private readonly reindexQueue: FileReindexQueueStore,
+  ) {}
 
   public async listSources(): Promise<readonly SourceDescriptor[]> {
     return this.sources;
@@ -219,17 +383,28 @@ export class StaticCatalogSearchProvider implements SearchProvider {
     return hits;
   }
 
-  public async queueReindex(sourceIds?: readonly string[]): Promise<{ queuedSourceIds: readonly string[]; mode: "stub" }> {
-    const queuedSourceIds = sourceIds?.length ? sourceIds : this.sources.map((source) => source.id);
+  public async queueReindex(sourceIds?: readonly string[]): Promise<{ queuedSourceIds: readonly string[]; mode: "file-queue" }> {
+    const knownSourceIds = new Set(this.sources.map((source) => source.id));
+    const requestedIds = sourceIds?.length
+      ? sourceIds
+      : this.sources.map((source) => source.id);
+    const queuedSourceIds = [...new Set(requestedIds)].filter((sourceId) => knownSourceIds.has(sourceId));
+
+    const persistedQueueIds = await this.reindexQueue.enqueue(queuedSourceIds);
     return {
-      queuedSourceIds,
-      mode: "stub",
+      queuedSourceIds: persistedQueueIds,
+      mode: "file-queue",
     };
   }
 }
 
-export const createDefaultSearchProvider = (): SearchProvider => {
-  return new StaticCatalogSearchProvider();
+export const createDefaultSearchProvider = (options?: {
+  stateDir?: string;
+  sources?: readonly SourceDescriptor[];
+}): SearchProvider => {
+  const sources = options?.sources ?? defaultSourceCatalog;
+  const reindexQueue = new FileReindexQueueStore(options?.stateDir ?? "data/ingest-worker");
+  return new StaticCatalogSearchProvider(sources, reindexQueue);
 };
 
 // ---------------------------------------------------------------------------
@@ -259,6 +434,8 @@ export interface SourceIndexRecord {
   tags: readonly string[];
 }
 
+type SerializableValue = object | string | number | boolean | null;
+
 export class FileChunkStore {
   public constructor(private readonly stateDir: string) {}
 
@@ -274,24 +451,52 @@ export class FileChunkStore {
     return path.join(this.sourceDir(sourceId), "_index.json");
   }
 
+  private async writeJsonAtomic(filePath: string, payload: SerializableValue): Promise<void> {
+    const tempPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
+    await writeFile(tempPath, JSON.stringify(payload, null, 2), "utf8");
+    await rename(tempPath, filePath);
+  }
+
+  private async quarantineCorruptFile(filePath: string): Promise<void> {
+    const quarantinePath = `${filePath}.corrupt.${Date.now()}`;
+    await rename(filePath, quarantinePath);
+  }
+
   public async saveChunk(chunk: ChunkRecord): Promise<void> {
     await mkdir(this.sourceDir(chunk.sourceId), { recursive: true });
     const filePath = path.join(this.sourceDir(chunk.sourceId), `${chunk.id}.json`);
-    await writeFile(filePath, JSON.stringify(chunk, null, 2), "utf8");
+    await this.writeJsonAtomic(filePath, chunk);
   }
 
   /** Persist a source-level index manifest after all chunks for that source are written. */
   public async saveSourceIndex(record: SourceIndexRecord): Promise<void> {
     await mkdir(this.sourceDir(record.sourceId), { recursive: true });
-    await writeFile(this.sourceIndexPath(record.sourceId), JSON.stringify(record, null, 2), "utf8");
+    await this.writeJsonAtomic(this.sourceIndexPath(record.sourceId), record);
   }
 
   /** Load the index manifest for a single source, or undefined if not present. */
   public async loadSourceIndex(sourceId: string): Promise<SourceIndexRecord | undefined> {
+    const indexPath = this.sourceIndexPath(sourceId);
+    let raw: string;
+
     try {
-      const raw = await readFile(this.sourceIndexPath(sourceId), "utf8");
+      raw = await readFile(indexPath, "utf8");
+    } catch (error) {
+      const code = typeof error === "object" && error !== null && "code" in error
+        ? (error as { code?: string }).code
+        : undefined;
+      if (code === "ENOENT") {
+        return undefined;
+      }
+      throw error;
+    }
+
+    try {
       return JSON.parse(raw) as SourceIndexRecord;
     } catch {
+      await this.quarantineCorruptFile(indexPath).catch(() => {
+        // Ignore quarantine failures; best effort only.
+      });
       return undefined;
     }
   }
@@ -303,8 +508,14 @@ export class FileChunkStore {
     let sourceDirs: string[];
     try {
       sourceDirs = await readdir(this.chunksDir());
-    } catch {
-      return [];
+    } catch (error) {
+      const code = typeof error === "object" && error !== null && "code" in error
+        ? (error as { code?: string }).code
+        : undefined;
+      if (code === "ENOENT") {
+        return [];
+      }
+      throw error;
     }
 
     for (const sourceId of sourceDirs) {
@@ -321,8 +532,14 @@ export class FileChunkStore {
     let sourceDirs: string[];
     try {
       sourceDirs = await readdir(this.chunksDir());
-    } catch {
-      return [];
+    } catch (error) {
+      const code = typeof error === "object" && error !== null && "code" in error
+        ? (error as { code?: string }).code
+        : undefined;
+      if (code === "ENOENT") {
+        return [];
+      }
+      throw error;
     }
 
     for (const sourceId of sourceDirs) {
@@ -339,16 +556,25 @@ export class FileChunkStore {
     let files: string[];
     try {
       files = await readdir(dir);
-    } catch {
-      return [];
+    } catch (error) {
+      const code = typeof error === "object" && error !== null && "code" in error
+        ? (error as { code?: string }).code
+        : undefined;
+      if (code === "ENOENT") {
+        return [];
+      }
+      throw error;
     }
 
     for (const file of files.filter((f) => f.endsWith(".json") && !f.startsWith("_"))) {
+      const filePath = path.join(dir, file);
       try {
-        const raw = await readFile(path.join(dir, file), "utf8");
+        const raw = await readFile(filePath, "utf8");
         results.push(JSON.parse(raw) as ChunkRecord);
       } catch {
-        // skip malformed chunk files
+        await this.quarantineCorruptFile(filePath).catch(() => {
+          // Ignore quarantine failures; best effort only.
+        });
       }
     }
 
@@ -358,8 +584,14 @@ export class FileChunkStore {
   public async listIndexedSourceIds(): Promise<string[]> {
     try {
       return await readdir(this.chunksDir());
-    } catch {
-      return [];
+    } catch (error) {
+      const code = typeof error === "object" && error !== null && "code" in error
+        ? (error as { code?: string }).code
+        : undefined;
+      if (code === "ENOENT") {
+        return [];
+      }
+      throw error;
     }
   }
 }
@@ -424,11 +656,14 @@ export class ChunkSearchProvider implements SearchProvider {
     return merged;
   }
 
-  public async queueReindex(sourceIds?: readonly string[]): Promise<{ queuedSourceIds: readonly string[]; mode: "stub" }> {
+  public async queueReindex(sourceIds?: readonly string[]): Promise<{ queuedSourceIds: readonly string[]; mode: "file-queue" }> {
     return this.catalog.queueReindex(sourceIds);
   }
 }
 
 export const createChunkSearchProvider = (stateDir: string): ChunkSearchProvider => {
-  return new ChunkSearchProvider(new FileChunkStore(stateDir), new StaticCatalogSearchProvider());
+  return new ChunkSearchProvider(
+    new FileChunkStore(stateDir),
+    new StaticCatalogSearchProvider(defaultSourceCatalog, new FileReindexQueueStore(stateDir)),
+  );
 };

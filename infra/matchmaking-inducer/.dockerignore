@@ -1,0 +1,6 @@
+node_modules
+README.md
+*.md
+fly.toml
+render.yaml
+railway.toml

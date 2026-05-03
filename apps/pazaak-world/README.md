@@ -24,6 +24,19 @@ server inside the running `pazaak-bot` process. Start the bot first:
 pnpm --filter @openkotor/pazaak-bot dev
 ```
 
+## Routes and Operator Console
+
+- `/bots` renders the public Discord bots hub (invites, docs, Web UI links).
+- `/community-bots` renders the OpenKOTOR Bots operator console (API probes, runbooks).
+- `/bots/pazaakworld` renders the PazaakWorld game surface.
+- The operator console can probe API targets, build `VITE_API_BASES`, copy endpoint snippets,
+  export an OpenAPI-style sketch, filter bot surfaces, track readiness checks, and show setup or
+  maintenance runbooks for the embedded API, Cloudflare Worker fallback, OAuth, Pages, and ingest
+  worker flows.
+
+For local multiplayer or signed API probes, run the Pazaak bot first so `http://localhost:4001`
+is available, then use the console's Primary API origin field to select that target.
+
 ## Environment
 
 Create `.env` (copy `.env.example`) and fill in:
@@ -57,9 +70,9 @@ schema exports in `@openkotor/persistence`.
 pnpm --filter pazaak-world build
 ```
 
-Deploy `dist/` to any static host. In production the Activity URL must be registered in the
-Discord Developer Portal (Activities → URL Mappings) and the bot's `PAZAAK_ACTIVITY_URL` env var
-must point to the public URL.
+Deploy `dist/` to any static host. The canonical production URL is
+`https://openkotor.github.io/bots/pazaakworld`; register that URL in the Discord Developer Portal
+(Activities -> URL Mappings) and use it for `PAZAAK_ACTIVITY_URL` plus `PAZAAK_PUBLIC_WEB_ORIGIN`.
 
 ## React Compiler
 

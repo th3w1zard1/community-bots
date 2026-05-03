@@ -4,10 +4,14 @@
 [submodule "vendor/llm_fallbacks"]
 	path = vendor/llm_fallbacks
 	url = https://github.com/bolabaden/llm_fallbacks.git
-[submodule "vendor/PazaakWorld"]
-	path = vendor/PazaakWorld
-	url = C:/GitHub/PazaakWorld
 [submodule "vendor/HoloPazaak"]
 	path = vendor/HoloPazaak
 	url = https://github.com/OpenKotOR/HoloPazaak
 	branch = master
+[submodule "wiki"]
+	path = wiki
+	url = https://github.com/OpenKotOR/community-bots.wiki.git
+	branch = master
+[submodule "vendor/qa-webui"]
+	path = vendor/qa-webui
+	url = https://github.com/OpenKotOR/qa-trask-webui.git

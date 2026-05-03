@@ -1,9 +1,11 @@
 import { useState, useEffect, useCallback, useRef, type KeyboardEvent as ReactKeyboardEvent } from "react";
+import { AdminPolicyPanel } from "./AdminPolicyPanel.tsx";
 import { SettingsModal } from "./SettingsModal.tsx";
 import { ConnectionStatus } from "./ConnectionStatus.tsx";
 import type { PazaakUserSettings } from "../types.ts";
 import type { MatchSocketConnectionState } from "../api.ts";
 import { soundManager } from "../utils/soundManager.ts";
+import { formatCornerRatingSubtitle } from "../utils/ratingLabels.ts";
 
 const menuIcon = (icon: string): string => {
   const MENU_ICON_MAP: Record<string, string> = {
@@ -30,6 +32,8 @@ const menuIcon = (icon: string): string => {
 interface GlobalAccountCornerProps {
   username: string;
   mmr: number | null;
+  /** Rating deviation (Glicko-style confidence); omitted for guests. */
+  mmrRd?: number | null;
   isOnline: boolean;
   canLogout: boolean;
   canJumpToLobby: boolean;
@@ -41,11 +45,14 @@ interface GlobalAccountCornerProps {
   onLogout: () => void;
   onSignIn: () => void;
   onSettingsSave?: (settings: PazaakUserSettings) => Promise<void>;
+  /** When set (standalone / logged-in session), show Ops policy editor for admins. */
+  accessToken?: string | null;
 }
 
 export function GlobalAccountCorner({
   username,
   mmr,
+  mmrRd = null,
   isOnline,
   canLogout,
   canJumpToLobby,
@@ -57,9 +64,11 @@ export function GlobalAccountCorner({
   onLogout,
   onSignIn,
   onSettingsSave,
+  accessToken = null,
 }: GlobalAccountCornerProps) {
   const [identityMenuOpen, setIdentityMenuOpen] = useState(false);
   const [settingsModalOpen, setSettingsModalOpen] = useState(false);
+  const [adminPolicyOpen, setAdminPolicyOpen] = useState(false);
   const [copyStatus, setCopyStatus] = useState<"idle" | "success" | "error">("idle");
   const rootRef = useRef<HTMLDivElement | null>(null);
   const identityMenuRef = useRef<HTMLDivElement | null>(null);
@@ -243,12 +252,14 @@ export function GlobalAccountCorner({
           aria-expanded={identityMenuOpen}
           aria-controls="global-identity-menu"
           onKeyDown={handleIdentityTriggerKeyDown}
-          title="Open account menu"
+          title={mmr === null ? "Open account menu" : `Open account menu — ${formatCornerRatingSubtitle(mmr, mmrRd ?? undefined)} (RD = rating deviation / confidence, like Chess.com’s Glicko docs)`}
         >
           <span className="activity-global-corner__icon" aria-hidden="true">◌</span>
           <span className="activity-global-corner__copy">
             <strong>{username}</strong>
-            <small>{mmr === null ? "Guest" : `MMR: ${mmr}`}</small>
+            <small>
+              {mmr === null ? "Guest" : formatCornerRatingSubtitle(mmr, mmrRd ?? undefined)}
+            </small>
           </span>
         </button>
         <button
@@ -309,6 +320,19 @@ export function GlobalAccountCorner({
               Return to lobby
             </button>
           ) : null}
+          {accessToken ? (
+            <button
+              className="activity-global-corner__item"
+              type="button"
+              onClick={() => {
+                setAdminPolicyOpen(true);
+                closeIdentityMenu();
+              }}
+              role="menuitem"
+            >
+              Ops policy…
+            </button>
+          ) : null}
           {canLogout ? (
             <button
               className="activity-global-corner__item"
@@ -348,6 +372,13 @@ export function GlobalAccountCorner({
         onClose={() => setSettingsModalOpen(false)}
         onSave={onSettingsSave || (async () => {})}
       />
+      {accessToken ? (
+        <AdminPolicyPanel
+          isOpen={adminPolicyOpen}
+          accessToken={accessToken}
+          onClose={() => setAdminPolicyOpen(false)}
+        />
+      ) : null}
     </div>
   );
 }

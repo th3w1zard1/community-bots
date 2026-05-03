@@ -23,6 +23,30 @@
       "path": "packages/pazaak-engine"
     },
     {
+      "path": "packages/pazaak-policy"
+    },
+    {
+      "path": "packages/pazaak-rating"
+    },
+    {
+      "path": "packages/blackjack-engine"
+    },
+    {
+      "path": "packages/pazaak-tournament"
+    },
+    {
+      "path": "packages/platform"
+    },
+    {
+      "path": "packages/trask"
+    },
+    {
+      "path": "packages/trask-http"
+    },
+    {
+      "path": "apps/trask-http-server"
+    },
+    {
       "path": "apps/trask-bot"
     },
     {
@@ -30,6 +54,9 @@
     },
     {
       "path": "apps/pazaak-bot"
+    },
+    {
+      "path": "apps/pazaak-nakama"
     },
     {
       "path": "apps/ingest-worker"

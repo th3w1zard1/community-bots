@@ -7,15 +7,21 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test:e2e": "playwright test",
+    "test:e2e:headed": "playwright test --headed"
   },
   "dependencies": {
-    "@openkotor/pazaak-engine": "workspace:*",
     "@discord/embedded-app-sdk": "^2.4.1",
+    "@heroiclabs/nakama-js": "^2.8.0",
+    "@openkotor/blackjack-engine": "workspace:*",
+    "@openkotor/pazaak-engine": "workspace:*",
+    "@openkotor/platform": "workspace:*",
     "react": "^19.2.4",
     "react-dom": "^19.2.4"
   },
   "devDependencies": {
+    "@playwright/test": "^1.58.0",
     "@eslint/js": "^9.39.4",
     "@tailwindcss/vite": "^4.2.2",
     "@types/node": "^24.12.2",

@@ -1,0 +1,111 @@
+# Deploy the regional reverse-proxy container when credentials exist (no local OAuth required).
+name: Deploy matchmaking inducer
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "infra/matchmaking-inducer/**"
+      - ".github/workflows/deploy-matchmaking-inducer.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: matchmaking-inducer
+  cancel-in-progress: true
+
+jobs:
+  fly:
+    name: Fly.io (Docker remote build)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check Fly inputs
+        id: chk
+        shell: bash
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          FLY_APP: ${{ vars.FLY_INDUCER_APP_NAME }}
+        run: |
+          if [ -n "$FLY_API_TOKEN" ] && [ -n "$FLY_APP" ]; then
+            echo "go=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "go=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Skipping Fly deploy. Add repo secret FLY_API_TOKEN and variable FLY_INDUCER_APP_NAME (Fly app name)."
+          fi
+
+      - uses: actions/checkout@v4
+        if: steps.chk.outputs.go == 'true'
+
+      - uses: superfly/flyctl-actions/setup-flyctl@v1
+        if: steps.chk.outputs.go == 'true'
+
+      - name: Sync upstream URL to Fly secrets
+        if: steps.chk.outputs.go == 'true'
+        working-directory: infra/matchmaking-inducer
+        shell: bash
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          FLY_APP: ${{ vars.FLY_INDUCER_APP_NAME }}
+          WORKER_URL: ${{ vars.PAZAAK_WORKER_URL }}
+        run: |
+          if [ -z "$WORKER_URL" ]; then
+            echo "::warning::PAZAAK_WORKER_URL repo variable empty — Fly app must already have MATCHMAKING_UPSTREAM_URL set (fly secrets set)."
+          else
+            flyctl secrets set "MATCHMAKING_UPSTREAM_URL=$WORKER_URL" --app "$FLY_APP"
+          fi
+
+      - name: Deploy to Fly
+        if: steps.chk.outputs.go == 'true'
+        working-directory: infra/matchmaking-inducer
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          FLY_APP: ${{ vars.FLY_INDUCER_APP_NAME }}
+        run: flyctl deploy --remote-only --app "$FLY_APP"
+
+  render-hook:
+    name: Render (deploy hook)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Render deploy
+        shell: bash
+        env:
+          HOOK: ${{ secrets.RENDER_INDUCER_DEPLOY_HOOK_URL }}
+        run: |
+          if [ -z "$HOOK" ]; then
+            echo "::notice::RENDER_INDUCER_DEPLOY_HOOK_URL not set — skipping Render hook."
+            exit 0
+          fi
+          curl -fsS -X POST "$HOOK"
+
+  railway-hook:
+    name: Railway (deploy hook)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Railway deploy
+        shell: bash
+        env:
+          HOOK: ${{ secrets.RAILWAY_INDUCER_DEPLOY_HOOK_URL }}
+        run: |
+          if [ -z "$HOOK" ]; then
+            echo "::notice::RAILWAY_INDUCER_DEPLOY_HOOK_URL not set — skipping Railway hook."
+            exit 0
+          fi
+          curl -fsS -X POST "$HOOK"
+
+  koyeb-hook:
+    name: Koyeb (deploy webhook)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Koyeb redeploy
+        shell: bash
+        env:
+          HOOK: ${{ secrets.KOYEB_INDUCER_DEPLOY_HOOK_URL }}
+        run: |
+          if [ -z "$HOOK" ]; then
+            echo "::notice::KOYEB_INDUCER_DEPLOY_HOOK_URL not set — skipping Koyeb hook."
+            exit 0
+          fi
+          curl -fsS -X POST "$HOOK"

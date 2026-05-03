@@ -1,0 +1,21 @@
+{
+  "name": "@openkotor/matchmaking-inducer",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Regional reverse proxy to authoritative Cloudflare matchmaking Worker (HTTP + WebSocket).",
+  "main": "server.mjs",
+  "scripts": {
+    "start": "node server.mjs",
+    "dev": "node --watch server.mjs",
+    "ci:bootstrap": "node scripts/bootstrap-github-ci.mjs",
+    "deploy:fly": "node scripts/deploy-fly.mjs",
+    "ci:trigger": "node scripts/trigger-github-deploy.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "http-proxy": "^1.18.1"
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "name": "@openkotor/pazaak-nakama",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Nakama TypeScript runtime for Pazaak World matchmaking and authoritative matches.",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -b && tsx scripts/build-runtime.ts",
+    "check": "tsc -b --pretty false",
+    "dev": "tsx scripts/build-runtime.ts --watch"
+  },
+  "dependencies": {
+    "@openkotor/pazaak-engine": "workspace:*",
+    "@openkotor/pazaak-policy": "workspace:*",
+    "@openkotor/pazaak-rating": "workspace:*",
+    "@openkotor/pazaak-tournament": "workspace:*"
+  },
+  "devDependencies": {
+    "esbuild": "^0.27.2",
+    "tsx": "^4.20.6",
+    "typescript": "~6.0.2"
+  }
+}

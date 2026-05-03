@@ -1,0 +1,124 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openkotor.dev/schemas/pazaak-policy.v1.json",
+  "title": "PazaakOpsPolicy",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "version",
+    "timers",
+    "matchmaking",
+    "features",
+    "blackjack",
+    "progression",
+    "admin",
+    "timeControls"
+  ],
+  "properties": {
+    "version": { "const": 1 },
+    "timers": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["turnTimerSeconds", "disconnectForfeitMs", "turnTimeoutMs", "reconnectGraceMs"],
+      "properties": {
+        "turnTimerSeconds": { "type": "integer", "minimum": 1 },
+        "disconnectForfeitMs": { "type": "integer", "minimum": 0 },
+        "turnTimeoutMs": { "type": "integer", "minimum": 0 },
+        "reconnectGraceMs": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "matchmaking": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tickMs", "queueWidenAfterMs", "regions", "defaultRegionId"],
+      "properties": {
+        "tickMs": { "type": "integer", "minimum": 1 },
+        "queueWidenAfterMs": { "type": "integer", "minimum": 0 },
+        "defaultRegionId": { "type": "string", "minLength": 1 },
+        "regions": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "label"],
+            "properties": {
+              "id": { "type": "string", "minLength": 1 },
+              "label": { "type": "string", "minLength": 1 },
+              "locationHint": { "type": "string", "minLength": 1 }
+            }
+          }
+        }
+      }
+    },
+    "features": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "workerMatchAuthority",
+        "dualWriteMatchesToWorker",
+        "dualWriteMatchesToBot",
+        "allowPrivateBackendUrl",
+        "blackjackOnlineEnabled"
+      ],
+      "properties": {
+        "workerMatchAuthority": { "type": "boolean" },
+        "dualWriteMatchesToWorker": { "type": "boolean" },
+        "dualWriteMatchesToBot": { "type": "boolean" },
+        "allowPrivateBackendUrl": { "type": "boolean" },
+        "blackjackOnlineEnabled": { "type": "boolean" }
+      }
+    },
+    "blackjack": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["shoeDecks", "dealerHitsSoft17", "modifiers"],
+      "properties": {
+        "shoeDecks": { "type": "integer", "minimum": 1, "maximum": 16 },
+        "dealerHitsSoft17": { "type": "boolean" },
+        "modifiers": { "type": "object" }
+      }
+    },
+    "progression": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["milestonesEnabled"],
+      "properties": {
+        "milestonesEnabled": { "type": "boolean" }
+      }
+    },
+    "admin": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["discordUserAllowlist"],
+      "properties": {
+        "discordUserAllowlist": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "timeControls": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["presets"],
+      "properties": {
+        "presets": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "label", "turnSeconds"],
+            "properties": {
+              "id": { "type": "string", "minLength": 1 },
+              "label": { "type": "string", "minLength": 1 },
+              "turnSeconds": { "type": "integer", "minimum": 1 },
+              "incrementSeconds": { "type": "integer", "minimum": 0 }
+            }
+          }
+        }
+      }
+    }
+  }
+}

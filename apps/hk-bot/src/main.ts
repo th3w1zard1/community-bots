@@ -16,9 +16,18 @@ import { JsonDesignationPresetRepository, resolveDataFile } from "@openkotor/per
 import { asBulletList, buildErrorEmbed, buildInfoEmbed, buildSuccessEmbed, buildWarningEmbed } from "@openkotor/discord-ui";
 import { findCuratedRoleById, groupCuratedRolesByCategory, hkCuratedRoles, personaProfiles } from "@openkotor/personas";
 
+import { getBotMember, mutateMemberRole } from "./member-role-mutate.js";
+import { ReactionRoleConfigLoader } from "./reaction-role-config.js";
+import { registerReactionRoleHandlers } from "./reaction-role-handlers.js";
+import { buildReactionsHelpEmbed, buildReactionsStatusEmbed } from "./reaction-role-setup-ui.js";
+
 const logger = createLogger("hk-bot");
 const config = loadHkBotConfig();
 const presetRepo = new JsonDesignationPresetRepository(resolveDataFile(config.dataDir, "designation-presets.json"));
+const reactionRoleConfigLoader = new ReactionRoleConfigLoader(
+  resolveDataFile(config.dataDir, "reaction-role-panels.json"),
+  logger,
+);
 
 const designationChoices = hkCuratedRoles.map((role) => ({
   name: role.name,
@@ -68,6 +77,19 @@ const designationsCommand = new SlashCommandBuilder()
           .setRequired(true)
           .addChoices(...designationChoices);
       });
+  })
+  .addSubcommandGroup((group) => {
+    return group
+      .setName("reactions")
+      .setDescription("Reaction-for-role panel operators.")
+      .addSubcommand((sub) =>
+        sub.setName("help").setDescription("Full setup checklist, intents note, and bot invite link."),
+      )
+      .addSubcommand((sub) =>
+        sub
+          .setName("status")
+          .setDescription("Reload reaction-role-panels.json from disk and summarize panels (Manage Server)."),
+      );
   });
 
 const getCurrentDesignationIds = (member: GuildMember): string[] => {
@@ -132,16 +154,6 @@ const resolveCuratedGuildRoles = (member: GuildMember): Map<string, Role | undef
   );
 };
 
-const getBotMember = async (member: GuildMember): Promise<GuildMember> => {
-  const existing = member.guild.members.me;
-
-  if (existing) {
-    return existing;
-  }
-
-  return member.guild.members.fetch(member.client.user.id);
-};
-
 const applyDesignationSelection = async (
   member: GuildMember,
   selectedIds: readonly string[],
@@ -159,6 +171,7 @@ const applyDesignationSelection = async (
   const removed: string[] = [];
   const missing: string[] = [];
   const blocked: string[] = [];
+  const auditReason = `HK designation sync for ${member.user.tag}`;
 
   for (const roleDefinition of hkCuratedRoles) {
     const role = roleMap.get(roleDefinition.id);
@@ -171,22 +184,30 @@ const applyDesignationSelection = async (
       continue;
     }
 
-    if (role.position >= botMember.roles.highest.position) {
-      if (desiredIds.has(roleDefinition.id) !== currentIds.has(roleDefinition.id)) {
-        blocked.push(role.name);
+    if (desiredIds.has(roleDefinition.id) && !currentIds.has(roleDefinition.id)) {
+      const result = await mutateMemberRole(member, role, "add", botMember, auditReason);
+
+      if (result.kind === "assigned") {
+        assigned.push(result.roleName);
+      }
+
+      if (result.kind === "blocked") {
+        blocked.push(result.roleName);
       }
 
       continue;
     }
 
-    if (desiredIds.has(roleDefinition.id) && !currentIds.has(roleDefinition.id)) {
-      await member.roles.add(role, `HK designation sync for ${member.user.tag}`);
-      assigned.push(role.name);
-    }
-
     if (!desiredIds.has(roleDefinition.id) && currentIds.has(roleDefinition.id)) {
-      await member.roles.remove(role, `HK designation sync for ${member.user.tag}`);
-      removed.push(role.name);
+      const result = await mutateMemberRole(member, role, "remove", botMember, auditReason);
+
+      if (result.kind === "removed") {
+        removed.push(result.roleName);
+      }
+
+      if (result.kind === "blocked") {
+        blocked.push(result.roleName);
+      }
     }
   }
 
@@ -254,12 +275,15 @@ const replyWithSelectionSummary = async (
   });
 };
 
-const client = createBotClient({ guildMembers: true });
+const client = createBotClient({ guildMembers: true, guildMessageReactions: true });
+
+registerReactionRoleHandlers(client, logger, reactionRoleConfigLoader);
 
 client.once("ready", (readyClient) => {
   logger.info("HK designation unit online.", {
     user: readyClient.user.tag,
     designationCount: hkCuratedRoles.length,
+    reactionRolePanelsPath: resolveDataFile(config.dataDir, "reaction-role-panels.json"),
   });
 });
 
@@ -290,6 +314,48 @@ client.on("interactionCreate", async (interaction) => {
       }
 
       const member = await guild.members.fetch(interaction.user.id);
+
+      if (interaction.options.getSubcommandGroup(false) === "reactions") {
+        const reactionSub = interaction.options.getSubcommand(true);
+
+        if (reactionSub === "help") {
+          await interaction.reply({
+            embeds: [
+              buildReactionsHelpEmbed({
+                appId: config.discord.appId,
+                configPath: reactionRoleConfigLoader.configPath,
+              }),
+            ],
+            ephemeral: true,
+          });
+          return;
+        }
+
+        if (reactionSub === "status") {
+          if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) {
+            await interaction.reply({
+              embeds: [
+                buildErrorEmbed({
+                  title: "Insufficient Permissions",
+                  description: "Statement: Only guild managers can inspect reaction panel config.",
+                }),
+              ],
+              ephemeral: true,
+            });
+            return;
+          }
+
+          reactionRoleConfigLoader.invalidateCache();
+          const snapshot = reactionRoleConfigLoader.getSnapshot();
+
+          await interaction.reply({
+            embeds: [buildReactionsStatusEmbed({ loader: reactionRoleConfigLoader, snapshot })],
+            ephemeral: true,
+          });
+          return;
+        }
+      }
+
       const subcommand = interaction.options.getSubcommand(true);
 
       if (subcommand === "list") {
@@ -401,7 +467,7 @@ client.on("interactionCreate", async (interaction) => {
       await replyWithSelectionSummary(interaction, member, summary, interaction.values);
     }
   } catch (error) {
-    logger.error("HK interaction failed.", error);
+    logger.error("HK interaction failed.", error instanceof Error ? error : { error: String(error) });
 
     const payload = {
       embeds: [

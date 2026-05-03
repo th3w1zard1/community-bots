@@ -1,0 +1,39 @@
+name = "pazaak-matchmaking"
+main = "src/index.ts"
+compatibility_date = "2026-04-27"
+# pazaak-tournament (and peers) resolve node:crypto / node:fs / node:path at bundle time.
+compatibility_flags = ["nodejs_compat"]
+workers_dev = true
+
+[vars]
+SERVICE_NAME = "Pazaak Matchmaking Fallback"
+ALLOW_UNVERIFIED_INSTANCES = "1"
+PAZAAK_TURN_TIMEOUT_MS = "300000"
+PAZAAK_DISCONNECT_FORFEIT_MS = "30000"
+# Optional: comma-separated worker auth accountIds allowed to call /api/admin/policy
+# ADMIN_USER_IDS = ""
+# Set these as Cloudflare secrets for production Activity verification/token exchange:
+#   pnpm dlx wrangler secret put DISCORD_CLIENT_ID --config infra/pazaak-matchmaking-worker/wrangler.toml
+#   pnpm dlx wrangler secret put DISCORD_CLIENT_SECRET --config infra/pazaak-matchmaking-worker/wrangler.toml
+#   pnpm dlx wrangler secret put DISCORD_BOT_TOKEN --config infra/pazaak-matchmaking-worker/wrangler.toml
+# Optional when Discord requires an explicit redirect URI:
+#   pnpm dlx wrangler secret put DISCORD_REDIRECT_URI --config infra/pazaak-matchmaking-worker/wrangler.toml
+
+[durable_objects]
+bindings = [
+  { name = "COORDINATOR", class_name = "MatchCoordinator" },
+  { name = "RELAY_ROOM", class_name = "PazaakRelayRoom" },
+  { name = "MATCH_ACTOR", class_name = "MatchActor" }
+]
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["MatchCoordinator"]
+
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["PazaakRelayRoom"]
+
+[[migrations]]
+tag = "v3"
+new_sqlite_classes = ["MatchActor"]

@@ -12,15 +12,25 @@
     "check": "tsc -b tsconfig.workspace.json --pretty false",
     "check:pazaak-oauth": "node scripts/check_pazaak_oauth_readiness.mjs",
     "dev:trask": "pnpm --filter @openkotor/trask-bot dev",
+    "dev:trask-http": "pnpm --filter @openkotor/trask-http-server dev",
     "dev:hk": "pnpm --filter @openkotor/hk-bot dev",
+    "dev:hk86-web": "pnpm --filter hk86-web dev",
+    "test:hk86-web": "pnpm --filter hk86-web test:e2e",
     "dev:pazaak": "pnpm --filter @openkotor/pazaak-bot dev",
     "dev:pazaak-world": "pnpm --filter pazaak-world dev",
+    "dev:pazaak-nakama": "pnpm --filter @openkotor/pazaak-nakama build && docker compose -f infra/nakama/docker-compose.yml up",
+    "build:pazaak-nakama": "pnpm --filter @openkotor/pazaak-nakama build",
     "dev:ingest": "pnpm --filter @openkotor/ingest-worker dev",
-    "discord:install-links": "tsx scripts/discord-install-links.ts"
+    "discord:install-links": "tsx scripts/discord-install-links.ts",
+    "smoke:trask-gptr-dry": "python scripts/smoke_trask_headless_gptr.py --dry-run",
+    "smoke:trask-gptr": "python scripts/smoke_trask_headless_gptr.py",
+    "holocron:e2e": "pnpm --filter spark-template build && pnpm exec playwright test -c vendor/qa-webui/playwright.config.ts",
+    "discord:smoke-trask-commands": "node scripts/discord_trask_commands_smoke.mjs"
   },
   "devDependencies": {
+    "@playwright/test": "^1.58.0",
     "@types/node": "^24.0.7",
     "tsx": "^4.20.6",
-    "typescript": "^5.8.3"
+    "typescript": "~6.0.2"
   }
 }

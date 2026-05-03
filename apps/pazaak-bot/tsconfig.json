@@ -2,6 +2,10 @@
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
     "composite": true,
+    "target": "ES2022",
+    "lib": [
+      "ES2022"
+    ],
     "rootDir": "src",
     "outDir": "dist",
     "tsBuildInfoFile": "dist/.tsbuildinfo"
@@ -20,10 +24,25 @@
       "path": "../../packages/pazaak-engine"
     },
     {
+      "path": "../../packages/pazaak-tournament"
+    },
+    {
+      "path": "../../packages/platform"
+    },
+    {
       "path": "../../packages/persistence"
     },
     {
       "path": "../../packages/personas"
+    },
+    {
+      "path": "../../packages/retrieval"
+    },
+    {
+      "path": "../../packages/trask"
+    },
+    {
+      "path": "../../packages/trask-http"
     }
   ],
   "include": [

@@ -11,7 +11,8 @@
   "scripts": {
     "build": "tsc -b",
     "dev": "tsx src/main.ts",
-    "start": "node dist/main.js"
+    "start": "node dist/main.js",
+    "test": "pnpm run build && node --test dist/*.test.js"
   },
   "dependencies": {
     "@openkotor/config": "workspace:*",

@@ -25,7 +25,7 @@ Pazaak is from KOTOR. These are the canonical KOTOR-flavored house rules in use 
 
 - First player to **win 3 sets** wins the match and collects the wager.
 - A **tie** (both players stand on the same total in the same set) plays another set with
-  fresh side-deck hands — unless exactly one player has played a Tiebreaker card, in which
+  the same remaining side hands — unless exactly one player has played a Tiebreaker card, in which
   case that player wins the set.
 - If **5 sets tie in a row**, the match is force-resolved by current set record to prevent an
   infinite loop.
@@ -35,9 +35,9 @@ Pazaak is from KOTOR. These are the canonical KOTOR-flavored house rules in use 
 ### Sets
 
 Within each set:
-- Players aim to get their board total as close to **20** as possible without going over.
-- Going over 20 on a draw is an immediate **bust** — that player loses the set with no chance to
-  play a side card. Going over 20 from a side card play is also an immediate bust.
+- Players aim to get their board total as close to **20** as possible.
+- Going over 20 on a draw opens one side-card recovery window. The player only busts if the turn
+  resolves while they are still over 20, or if their one side card still leaves them over 20.
 - Filling all **9 board slots** without busting wins the set automatically.
 
 ### Decks
@@ -46,29 +46,44 @@ Within each set:
 |---|---|
 | Main deck | Four copies of cards 1 through 10 (40 cards total) |
 | Sideboard | Each player receives one exact canonical TSL side deck at match start, currently sampled from rows `10` (`VeryEasy`) through `14` (`VeryHard`) |
-| Hand | 4 cards drawn from the sideboard each set (always refreshed, including on ties) |
+| Hand | 4 cards drawn from the sideboard once at match start; spent cards stay spent across sets and ties |
 
-Side cards include the currently implemented TSL-confirmed subset:
+Private Activity lobbies can override the sideboard policy at table creation:
+- `Runtime random`: default per-seat runtime random sideboards.
+- `Each player active custom`: each human ready seat must have an active saved custom sideboard.
+- `Host mirrored custom`: both ready seats use the host's active saved custom sideboard.
+
+### Game modes
+
+Player-facing copy for cards, strategy, deck limits, and bust probability is centralized in **`PAZAAK_RULEBOOK`** (`packages/pazaak-engine/src/rules.ts`).
+
+- **Canonical** — Matchmaking, ranked tables, and wagered Discord challenges stay on TSL-verified cards only. Custom decks containing Wacky-only tokens fail validation.
+- **Wacky** — Adds `%3`–`%6` (mod previous), `/2` (halve previous), and `00` (hard reset). Private casual lobbies (Discord `/pazaak lobby action:create mode:wacky` or Activity lobby UI with Ranked off) pass `gameMode: "wacky"` into `createDirectMatch`.
+
+Side cards include the TSL-confirmed subset plus optional Wacky specials:
 
 | Type | Variants | Behavior |
 |---|---|---|
 | Plus (`+1`…`+6`) | Fixed positive | Always adds the stated value |
 | Minus (`-1`…`-6`) | Fixed negative | Always subtracts the stated value |
 | Flip (`±1`…`±6`) | Toggleable | Player chooses + or − at play time |
-| Value Change (`VV` / `±1/2`) | Special | Player chooses `+1`, `+2`, `-1`, or `-2` at play time |
-| Copy (`D`) | Special | Copies the resolved value of the previous board card; cannot be played onto an empty board |
-| Tiebreaker (`±1T`) | Special | Player chooses `+1` or `-1`; wins tied sets |
-| Flip 2&4 | Special | Occupies a board slot with value `0`, then flips the sign of all main-deck, plus, and minus 2s and 4s on the board |
-| Flip 3&6 | Special | Occupies a board slot with value `0`, then flips the sign of positive 3s and 6s already on the board |
+| Value Change (`VV` / `1±2` / `±1/2`) | Special | Player chooses `+1`, `+2`, `-1`, or `-2` at play time |
+| Copy (`D` / `$$`) | Special | Copies the resolved value of the previous board card; cannot be played onto an empty board |
+| Tiebreaker (`±1T` / `TT`) | Special | Player chooses `+1` or `-1`; wins tied sets |
+| Flip 2&4 (`F1`) | Special | Occupies a board slot with value `0`, then flips the sign of all main-deck, plus, and minus 2s and 4s on the board |
+| Flip 3&6 (`F2`) | Special | Occupies a board slot with value `0`, then flips the sign of positive 3s and 6s already on the board |
+| Mod previous (`%3`…`%6`) | Wacky | Replaces the previous board card with Python-style non-negative remainder modulo N |
+| Halve previous (`/2`) | Wacky | Replaces the previous board card with `trunc(prev / 2)` (toward zero) |
+| Hard reset (`00`) | Wacky | Places `0`, forces an immediate set tie, advances consecutive-tie counter |
 
 ### Turn Flow
 
 1. Player draws a card from the main deck (mandatory — must draw before standing).
-2. If the draw puts the total over 20, the player busts immediately (no recovery).
-3. Otherwise, the player may optionally play one side card, then stand or end the turn.
+2. If the draw puts the total over 20, the player may still play one side card to recover before ending the turn.
+3. The player may optionally play one side card, then stand or end the turn.
 4. Playing a side card does not end the turn — the player still chooses to stand or end turn afterward.
-5. Side cards can be played only once per set; one card maximum per turn.
-6. If a side card puts the total over 20, the player busts immediately.
+5. Side cards can be played only once per match; one card maximum per turn.
+6. If a side card puts or leaves the total over 20, the player busts immediately.
 
 ### Nine-Card Auto-Win
 
@@ -117,8 +132,9 @@ Shows, saves, activates, or clears your saved custom 10-card sideboards.
 | `clear` | no | Clear the active saved custom sideboard, or the named one if `name` is supplied |
 
 Saved custom sideboards use the same token legend shown by `/pazaak decks`: `+/-` for fixed cards,
-`*` for flip cards, `$$` or `D` for copy previous, `TT` for the tiebreaker, `F1` / `F2` for board
-flips, and `VV` for the selectable `+1/+2/-1/-2` card. Users can now keep multiple named custom
+`*` for flip cards, `$$` or `D` for copy previous, `TT` for the tiebreaker, `F1` / `2&4` and
+`F2` / `3&6` for board flips, and `VV` / `1±2` for the selectable `+1/+2/-1/-2` card. Regular fixed
+or flip tokens can appear up to four times each; gold/special tokens can appear once each. Users can now keep multiple named custom
 sideboards, and one of them is always active when at least one exists. The active saved custom
 sideboard is the one used from `/pazaak challenge use_custom:true` and from the challenged-player
 Accept picker. Running `/pazaak sideboard` with no options opens an ephemeral management screen with
@@ -129,6 +145,8 @@ left/right reorder controls, and a compact validation summary without exceeding 
 row limits. When a user has a large saved-sideboard library, both the management selector and the
 challenged-player Accept picker can now page through saved custom sideboards and open a name search
 modal instead of truncating at Discord's 25-option select-menu cap.
+
+Multiplayer flows enforce those duplicate limits in the match engine (public challenges, accept overrides, and private-lobby match start), so invalid sideboard compositions are rejected even if a client bypasses UI checks.
 
 The browser Activity workshop extends that with local name filtering, explicit rename, duplication,
 drag/drop slot reordering, and save-and-activate flows that are better suited to larger board
@@ -142,7 +160,48 @@ away from the ephemeral slash-command panel.
 
 ### `/pazaak rules`
 
-Displays the current pazaak ruleset embed.
+Paginated rulebook embed backed by `PAZAAK_RULEBOOK`.
+
+**Options:**
+| Option | Required | Description |
+|---|---|---|
+| `section` | no | Jump to `Basics`, `Cards`, `Strategy`, `Game Modes`, or `Tournaments` |
+
+A select menu on the message switches sections without re-running the command.
+
+---
+
+### `/pazaak card`
+
+**Options:**
+| Option | Required | Description |
+|---|---|---|
+| `token` | yes | Side-deck token to describe (`+2`, `*4`, `$$`, `%5`, `/2`, …) |
+
+Ephemeral response with rarity, copy limit, mechanic, coaching note, and TSL notes when present.
+
+---
+
+### `/pazaak strategy`
+
+**Options:**
+| Option | Required | Description |
+|---|---|---|
+| `total` | no | Highlight this board total (0–20) on the bust probability chart |
+
+Ephemeral primer with doctrine excerpts and the uniform-shoe bust table used by the advisor UI.
+
+---
+
+### `/pazaak tournament`
+
+Bracket lifecycle commands (`create`, `join`, `leave`, `list`, `start`, `bracket`, `standings`, `report`, `cancel`). Matches auto-schedule through `PazaakCoordinator`; settlement feeds `advanceTournament`. Admin overrides: `/pazaak-admin tournament force-report|reseed`.
+
+---
+
+### `/pazaak lobby`
+
+Cross-platform lobby helper (`list`, `create`, `join`, `ready`, `leave`, `add_ai`, `start`). **`mode`** on `create` chooses `canonical` (default) or `wacky` (casual experimental cards, ranked off).
 
 ---
 

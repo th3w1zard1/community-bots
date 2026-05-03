@@ -14,27 +14,72 @@
  *     to verify the token and extract the caller's user ID before acting.
  */
 
-import http from "node:http";
+import type http from "node:http";
 import { randomUUID } from "node:crypto";
-import type { AiDifficulty, PazaakCoordinator, PazaakMatch } from "@openkotor/pazaak-engine";
-import { MAIN_MENU_PRESET, SIDE_DECK_SIZE, normalizeSideDeckToken, pazaakOpponents, serializeMatch } from "@openkotor/pazaak-engine";
+import type { AiDifficulty, PazaakCoordinator, PazaakMatch, SideDeckChoice } from "@openkotor/pazaak-engine";
+import { MAIN_MENU_PRESET, SIDE_DECK_SIZE, assertCustomSideDeckTokenLimits, getDefaultPazaakOpponentForAdvisorDifficulty, normalizeSideDeckToken, pickWinStreakBonusToken, pazaakOpponents, playerAt, rollCrateContents, serializeMatch } from "@openkotor/pazaak-engine";
+import {
+  buildBrowserCorsAllowedOrigins,
+  buildSocialAuthAuthorizeUrl,
+  createNodeApiHost,
+  createObjectEnvLookup,
+  DISCORD_API_V10,
+  PAZAAK_SOCIAL_AUTH_PROVIDER_ENV_MAP,
+  SOCIAL_AUTH_PROVIDERS,
+  fetchDiscordSocialAuthProfile,
+  fetchGithubSocialAuthProfile,
+  fetchGoogleSocialAuthProfile,
+  isLocalhostUrl,
+  listSocialAuthProviders,
+  requireBearerToken,
+  resolveCorsHeaders,
+  resolveSocialAuthProviderConfig,
+  trimTrailingSlashes,
+  type CardGameType,
+  type CardWorldConfig,
+  type SocialAuthProvider,
+} from "@openkotor/platform";
+import {
+  createOptionalAuthHandler,
+  createRequiredAuthHandler,
+  createDevBearerAuthResolver,
+  createHeaderProfileAuthResolver,
+  createSessionAuthResolver,
+  resolveOptionalWithAuthResolvers,
+  type AuthResolver,
+  type BearerAuthContext,
+  type NormalizedAuthHandlerError,
+} from "@openkotor/platform/auth";
+import { InMemoryTopicMessageStore, JsonWebSocketHub } from "@openkotor/platform/node-ws";
 import { hashPazaakPassword, verifyPazaakPassword } from "@openkotor/persistence";
+import type { SearchProvider } from "@openkotor/retrieval";
+import { createTraskHttpRouter } from "@openkotor/trask-http";
+import type { ResearchWizardClient } from "@openkotor/trask";
 import type {
-  JsonPazaakAccountRepository,
   PazaakLobbyRecord,
+  PazaakAccountRepositoryContract,
   JsonPazaakLobbyRepository,
   JsonPazaakMatchHistoryRepository,
   JsonPazaakMatchmakingQueueRepository,
   JsonPazaakSideboardRepository,
+  JsonTraskQueryRepository,
   JsonWalletRepository,
   PazaakAccountRecord,
   PazaakAccountSessionRecord,
   PazaakLinkedIdentityRecord,
+  PazaakCardBackStyle,
+  PazaakChatAudience,
+  PazaakSoundTheme,
+  PazaakTableAmbience,
   PazaakTableSettings,
-  PazaakThemePreference,
+  PazaakTableTheme,
+  PazaakLobbySideboardMode,
+  PazaakUserSettings,
 } from "@openkotor/persistence";
 import express, { type Request, type Response, type NextFunction } from "express";
-import { WebSocketServer, type WebSocket } from "ws";
+import { cloneDefaultPolicy, toPublicConfig, type PazaakOpsPolicy } from "@openkotor/pazaak-policy";
+
+import { buildMatchMilestoneUpdates } from "./milestone-grants.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -79,62 +124,43 @@ interface SerializedAccountSession {
   linkedIdentities: readonly PazaakLinkedIdentityRecord[];
 }
 
+type JsonPrimitive = string | number | boolean | null;
+type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
+type JsonObject = { [key: string]: JsonValue | undefined };
+type ScalarOrObject = JsonValue | object;
+
 // ---------------------------------------------------------------------------
 // Discord token verification
 // ---------------------------------------------------------------------------
 
-const DISCORD_API = "https://discord.com/api/v10";
+const DISCORD_API = DISCORD_API_V10;
 const APP_SESSION_TTL_MS = 1000 * 60 * 60 * 24 * 30;
-const OAUTH_PROVIDER_ENV = {
-  google: {
-    clientId: "PAZAAK_OAUTH_GOOGLE_CLIENT_ID",
-    clientSecret: "PAZAAK_OAUTH_GOOGLE_CLIENT_SECRET",
-    callbackUrl: "PAZAAK_OAUTH_GOOGLE_CALLBACK_URL",
-    startUrl: "PAZAAK_OAUTH_GOOGLE_URL",
-  },
-  discord: {
-    clientId: "PAZAAK_OAUTH_DISCORD_CLIENT_ID",
-    clientSecret: "PAZAAK_OAUTH_DISCORD_CLIENT_SECRET",
-    callbackUrl: "PAZAAK_OAUTH_DISCORD_CALLBACK_URL",
-    startUrl: "PAZAAK_OAUTH_DISCORD_URL",
-  },
-  github: {
-    clientId: "PAZAAK_OAUTH_GITHUB_CLIENT_ID",
-    clientSecret: "PAZAAK_OAUTH_GITHUB_CLIENT_SECRET",
-    callbackUrl: "PAZAAK_OAUTH_GITHUB_CALLBACK_URL",
-    startUrl: "PAZAAK_OAUTH_GITHUB_URL",
+const DEFAULT_PUBLIC_WEB_URL = "https://openkotor.github.io/bots/pazaakworld";
+const envLookup = createObjectEnvLookup(process.env);
+const oauthConfigOptions = {
+  envMap: PAZAAK_SOCIAL_AUTH_PROVIDER_ENV_MAP,
+  fallbackEnvKeys: {
+    discord: {
+      clientId: "PAZAAK_DISCORD_APP_ID",
+      clientSecret: "PAZAAK_DISCORD_CLIENT_SECRET",
+    },
   },
 } as const;
 
-type SocialAuthProvider = keyof typeof OAUTH_PROVIDER_ENV;
-
-const SOCIAL_PROVIDERS = Object.keys(OAUTH_PROVIDER_ENV) as SocialAuthProvider[];
+const normalizePublicWebUrl = (value: string | undefined): string => {
+  const trimmed = value?.trim();
+  return trimTrailingSlashes(trimmed && trimmed.length > 0 ? trimmed : DEFAULT_PUBLIC_WEB_URL);
+};
 
 const resolveOauthConfig = (provider: SocialAuthProvider) => {
-  const env = OAUTH_PROVIDER_ENV[provider];
-  const clientId = (process.env[env.clientId]?.trim()
-    || (provider === "discord" ? process.env.PAZAAK_DISCORD_APP_ID?.trim() : "")
-    || "");
-  const clientSecret = (process.env[env.clientSecret]?.trim()
-    || (provider === "discord" ? process.env.PAZAAK_DISCORD_CLIENT_SECRET?.trim() : "")
-    || "");
-  const callbackUrl = process.env[env.callbackUrl]?.trim() ?? "";
-  const startUrl = process.env[env.startUrl]?.trim() ?? "";
-
-  return {
-    clientId,
-    clientSecret,
-    callbackUrl,
-    startUrl,
-    enabled: Boolean(clientId && clientSecret),
-  };
+  return resolveSocialAuthProviderConfig(provider, envLookup, oauthConfigOptions);
 };
 
 const getSessionExpiresAt = (): string => new Date(Date.now() + APP_SESSION_TTL_MS).toISOString();
 const resolveGameUserId = (account: PazaakAccountRecord): string => account.legacyGameUserId ?? account.accountId;
 
 const serializeSession = async (
-  accountRepository: JsonPazaakAccountRepository,
+  accountRepository: PazaakAccountRepositoryContract,
   account: PazaakAccountRecord,
   session: PazaakAccountSessionRecord,
 ): Promise<SerializedAccountSession> => {
@@ -148,11 +174,7 @@ const serializeSession = async (
 
 /** Verify Bearer token → Discord user. Throws on bad/missing token. */
 async function resolveDiscordUser(authHeader: string | undefined): Promise<DiscordUser> {
-  if (!authHeader?.startsWith("Bearer ")) {
-    throw Object.assign(new Error("Missing or malformed Authorization header."), { status: 401 });
-  }
-
-  const token = authHeader.slice(7);
+  const token = requireBearerToken(authHeader);
 
   const res = await fetch(`${DISCORD_API}/users/@me`, {
     headers: { Authorization: `Bearer ${token}` },
@@ -188,100 +210,48 @@ export interface ChatMessage {
 // WebSocket hub — broadcast match updates to all subscribed clients
 // ---------------------------------------------------------------------------
 
-type WsClient = {
-  ws: WebSocket;
-  stream: "match" | "lobbies";
-  matchId: string;
-};
+type WsStream = "match" | "lobbies";
 
 class WsHub {
-  private readonly clients = new Set<WsClient>();
-  private readonly wss: WebSocketServer;
-  private readonly chatHistory = new Map<string, ChatMessage[]>();
+  private readonly hub: JsonWebSocketHub<WsStream>;
+  private readonly chatHistory = new InMemoryTopicMessageStore<ChatMessage>(100);
 
   public constructor(server: http.Server) {
-    this.wss = new WebSocketServer({ server, path: "/ws" });
-
-    this.wss.on("connection", (ws, req) => {
-      const url = new URL(req.url ?? "/", "http://localhost");
-      const stream = url.searchParams.get("stream") === "lobbies" ? "lobbies" : "match";
-      const matchId = url.searchParams.get("matchId") ?? "";
-      const entry: WsClient = { ws, stream, matchId };
-      this.clients.add(entry);
-
-      ws.on("close", () => {
-        this.clients.delete(entry);
-      });
-
-      ws.on("error", () => {
-        this.clients.delete(entry);
-      });
+    this.hub = new JsonWebSocketHub<WsStream>({
+      server,
+      path: "/ws",
+      resolveSubscription: (url) => {
+        const stream = url.searchParams.get("stream") === "lobbies" ? "lobbies" : "match";
+        const matchId = url.searchParams.get("matchId") ?? "";
+        return { stream, topicId: matchId };
+      },
     });
   }
 
   /** Push a serialized match snapshot to all subscribers of that match. */
   public broadcast(match: PazaakMatch): void {
-    const payload = JSON.stringify({ type: "match_update", data: safeSerialize(match) });
-
-    for (const client of this.clients) {
-      if (client.stream === "match" && client.matchId === match.id && client.ws.readyState === 1 /* OPEN */) {
-        try {
-          client.ws.send(payload);
-        } catch {
-          // Ignore send errors; client will be cleaned up on close.
-        }
-      }
-    }
+    this.hub.broadcastToTopic("match", match.id, "match_update", safeSerialize(match));
   }
 
   /** Push a single lobby snapshot to all lobby stream subscribers. */
   public broadcastLobby(lobby: PazaakLobbyRecord): void {
-    const payload = JSON.stringify({ type: "lobby_update", data: lobby });
-
-    for (const client of this.clients) {
-      if (client.stream === "lobbies" && client.ws.readyState === 1 /* OPEN */) {
-        try {
-          client.ws.send(payload);
-        } catch {
-          // Ignore send errors; client will be cleaned up on close.
-        }
-      }
-    }
+    this.hub.broadcastToStream("lobbies", "lobby_update", lobby);
   }
 
   /** Persist a chat message and push it to all match subscribers. */
   public broadcastChatMessage(matchId: string, msg: ChatMessage): void {
-    const history = this.chatHistory.get(matchId) ?? [];
-    history.push(msg);
-    if (history.length > 100) history.splice(0, history.length - 100);
-    this.chatHistory.set(matchId, history);
-
-    const payload = JSON.stringify({ type: "chat_message", data: msg });
-    for (const client of this.clients) {
-      if (client.stream === "match" && client.matchId === matchId && client.ws.readyState === 1) {
-        try { client.ws.send(payload); } catch { /* ignore */ }
-      }
-    }
+    this.chatHistory.append(matchId, msg);
+    this.hub.broadcastToTopic("match", matchId, "chat_message", msg);
   }
 
   /** Return stored chat history for a match. */
   public getChatHistory(matchId: string): ChatMessage[] {
-    return this.chatHistory.get(matchId) ?? [];
+    return this.chatHistory.list(matchId);
   }
 
   /** Push the current open lobby list to all lobby stream subscribers. */
   public broadcastLobbyList(lobbies: readonly PazaakLobbyRecord[]): void {
-    const payload = JSON.stringify({ type: "lobby_list_update", data: lobbies });
-
-    for (const client of this.clients) {
-      if (client.stream === "lobbies" && client.ws.readyState === 1 /* OPEN */) {
-        try {
-          client.ws.send(payload);
-        } catch {
-          // Ignore send errors; client will be cleaned up on close.
-        }
-      }
-    }
+    this.hub.broadcastToStream("lobbies", "lobby_list_update", lobbies);
   }
 }
 
@@ -297,39 +267,50 @@ export function createApiServer(
     discordClientSecret: string | undefined;
     activityOrigin: string;
     publicWebOrigin: string | undefined;
-    accountRepository: JsonPazaakAccountRepository;
+    accountRepository: PazaakAccountRepositoryContract;
     walletRepository: JsonWalletRepository;
     sideboardRepository: JsonPazaakSideboardRepository;
     matchmakingQueueRepository: JsonPazaakMatchmakingQueueRepository;
     lobbyRepository: JsonPazaakLobbyRepository;
     matchHistoryRepository: JsonPazaakMatchHistoryRepository;
+    trask?: {
+      searchProvider: SearchProvider;
+      researchWizard: ResearchWizardClient;
+      queryRepository: JsonTraskQueryRepository;
+    } | undefined;
+    botGameType?: CardGameType | undefined;
+    pazaakRequiresOwnershipProof?: boolean | undefined;
     matchmakingTickMs?: number | undefined;
     allowDevAuth?: boolean | undefined;
+    /** When set, served at `GET /api/config/public` (defaults to baked policy). */
+    opsPolicy?: PazaakOpsPolicy | undefined;
   },
 ): { server: http.Server; hub: WsHub; listen: () => void } {
   const app = express();
+  const cardWorldConfig: CardWorldConfig = {
+    botGameType: opts.botGameType ?? "pazaak",
+    defaultPublicGameType: (opts.botGameType ?? "pazaak") === "pazaak" && (opts.pazaakRequiresOwnershipProof ?? true)
+      ? "blackjack"
+      : (opts.botGameType ?? "pazaak"),
+    pazaakRequiresOwnershipProof: opts.pazaakRequiresOwnershipProof ?? true,
+    acceptedOwnershipProofFilenames: ["chitin.key"],
+  };
+  const allowedCorsOrigins = buildBrowserCorsAllowedOrigins({
+    discordAppId: opts.discordAppId,
+    activityOrigin: opts.activityOrigin,
+    publicWebOrigin: opts.publicWebOrigin,
+  });
 
   app.use(express.json());
 
   // Allow the Discord Activity iframe and localhost browser origins.
   app.use((req, res, next) => {
-    const allowedOrigins = [
-      `https://${opts.discordAppId}.discordsays.com`,
-      "http://localhost:5173",
-      "http://localhost:3000",
-      opts.activityOrigin,
-      opts.publicWebOrigin,
-    ].filter(Boolean);
-
-    const origin = req.headers.origin ?? "";
-    if (allowedOrigins.includes(origin)) {
-      res.setHeader("Access-Control-Allow-Origin", origin);
+    const cors = resolveCorsHeaders({ method: req.method, origin: req.headers.origin }, allowedCorsOrigins);
+    for (const [name, value] of Object.entries(cors.headers)) {
+      res.setHeader(name, value);
     }
-    res.setHeader("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,OPTIONS");
-    res.setHeader("Access-Control-Allow-Headers", "Content-Type,Authorization");
-    res.setHeader("Vary", "Origin");
 
-    if (req.method === "OPTIONS") {
+    if (cors.isPreflight) {
       res.sendStatus(204);
       return;
     }
@@ -339,109 +320,116 @@ export function createApiServer(
 
   // withAuth — wraps a handler that needs a verified Pazaak account.
   type AuthedHandler = (req: Request, res: Response, user: AuthenticatedPazaakUser) => void | Promise<void>;
+  type OptionalAuthHandler = (req: Request, res: Response, user: AuthenticatedPazaakUser | null) => void | Promise<void>;
 
-  const resolveDevUser = async (authHeader: string | undefined): Promise<AuthenticatedPazaakUser | null> => {
-    if (!opts.allowDevAuth) {
-      return null;
-    }
+  const resolveDiscordDisplayName = (user: DiscordUser): string => user.global_name?.trim() || user.username;
+  const resolveDisplayName = (user: AuthenticatedPazaakUser): string => user.displayName;
 
-    if (!authHeader?.startsWith("Bearer ")) {
-      return null;
-    }
+  const mapResolvedAccountUser = (
+    account: PazaakAccountRecord,
+    resolved: {
+      username: string;
+      displayName: string;
+      source: AuthenticatedPazaakUser["source"];
+      discordUserId?: string | undefined;
+      sessionId?: string | undefined;
+    },
+  ): AuthenticatedPazaakUser => ({
+    id: resolveGameUserId(account),
+    accountId: account.accountId,
+    username: resolved.username,
+    displayName: resolved.displayName,
+    source: resolved.source,
+    ...(resolved.discordUserId ? { discordUserId: resolved.discordUserId } : {}),
+    ...(resolved.sessionId ? { sessionId: resolved.sessionId } : {}),
+  });
 
-    const token = authHeader.slice(7);
-    if (!token.startsWith("dev-user-")) {
-      return null;
-    }
+  const authResolvers = [
+    createSessionAuthResolver({
+      resolveSessionToken: (token) => opts.accountRepository.resolveSessionToken(token),
+      mapResolvedSession: ({ account, session }) => mapResolvedAccountUser(account, {
+        username: account.username,
+        displayName: account.displayName,
+        source: "session",
+        sessionId: session.sessionId,
+      }),
+    }),
+    createDevBearerAuthResolver<PazaakAccountRecord, AuthenticatedPazaakUser>({
+      enabled: opts.allowDevAuth ?? false,
+      ensureAccount: ({ providerUserId, username, displayName }) => opts.accountRepository.ensureDiscordAccount({
+        discordUserId: providerUserId,
+        username,
+        displayName,
+      }),
+      mapResolvedAccount: ({ account, providerUserId, username, displayName }) => mapResolvedAccountUser(account, {
+        username,
+        displayName,
+        source: "dev",
+        discordUserId: providerUserId,
+      }),
+    }),
+    createHeaderProfileAuthResolver<DiscordUser, PazaakAccountRecord, AuthenticatedPazaakUser>({
+      name: "discord",
+      resolveProfile: (authHeader) => resolveDiscordUser(authHeader),
+      ensureAccount: ({ providerUserId, username, displayName }) => opts.accountRepository.ensureDiscordAccount({
+        discordUserId: providerUserId,
+        username,
+        displayName,
+      }),
+      getProviderUserId: (discordUser) => discordUser.id,
+      getUsername: (discordUser) => discordUser.username,
+      getDisplayName: resolveDiscordDisplayName,
+      mapResolvedAccount: ({ account, profile, displayName }) => mapResolvedAccountUser(account, {
+        username: account.username,
+        displayName,
+        source: "discord",
+        discordUserId: profile.id,
+      }),
+    }),
+  ] as const satisfies readonly AuthResolver<BearerAuthContext, AuthenticatedPazaakUser>[];
 
-    const rawId = token.slice("dev-user-".length).trim();
-    if (!rawId) {
-      throw Object.assign(new Error("Invalid dev auth token format."), { status: 401 });
-    }
-
-    const decoded = decodeURIComponent(rawId);
-    const username = decoded.replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 32) || "devuser";
-    const { account } = await opts.accountRepository.ensureDiscordAccount({
-      discordUserId: decoded,
-      username,
-      displayName: decoded,
-    });
-
-    return {
-      id: resolveGameUserId(account),
-      accountId: account.accountId,
-      username,
-      displayName: decoded,
-      source: "dev",
-      discordUserId: decoded,
-    };
+  const sendAuthError = (res: Response, err: NormalizedAuthHandlerError): void => {
+    res.status(err.status).json({ error: err.message });
   };
 
-  const resolveAuthenticatedUser = async (authHeader: string | undefined): Promise<AuthenticatedPazaakUser> => {
-    if (!authHeader?.startsWith("Bearer ")) {
-      throw Object.assign(new Error("Missing or malformed Authorization header."), { status: 401 });
-    }
-
-    const token = authHeader.slice(7);
-    const session = await opts.accountRepository.resolveSessionToken(token);
-    if (session) {
-      return {
-        id: resolveGameUserId(session.account),
-        accountId: session.account.accountId,
-        username: session.account.username,
-        displayName: session.account.displayName,
-        source: "session",
-        sessionId: session.session.sessionId,
-      };
-    }
-
-    const devUser = await resolveDevUser(authHeader);
-    if (devUser) {
-      return devUser;
-    }
-
-    const discordUser = await resolveDiscordUser(authHeader);
-    const displayName = resolveDiscordDisplayName(discordUser);
-    const { account } = await opts.accountRepository.ensureDiscordAccount({
-      discordUserId: discordUser.id,
-      username: discordUser.username,
-      displayName,
-    });
-
-    return {
-      id: resolveGameUserId(account),
-      accountId: account.accountId,
-      username: account.username,
-      displayName,
-      source: "discord",
-      discordUserId: discordUser.id,
-    };
+  const authHandlerOptions = {
+    resolvers: authResolvers,
+    invalidMessage: "Invalid Discord access token.",
+    getAuthHeader: (req: Request) => req.headers.authorization,
+    sendError: sendAuthError,
   };
 
   const withAuth = (handler: AuthedHandler) => {
+    const wrapped = createRequiredAuthHandler(authHandlerOptions, handler);
     return async (req: Request, res: Response, _next: NextFunction): Promise<void> => {
-      try {
-        const user = await resolveAuthenticatedUser(req.headers.authorization);
-        await handler(req, res, user);
-      } catch (err: unknown) {
-        const status = (err as { status?: number }).status ?? 500;
-        const message = err instanceof Error ? err.message : String(err);
-        res.status(status).json({ error: message });
-      }
+      await wrapped(req, res);
+    };
+  };
+
+  const withOptionalAuth = (handler: OptionalAuthHandler) => {
+    const wrapped = createOptionalAuthHandler(authHandlerOptions, handler);
+    return async (req: Request, res: Response, _next: NextFunction): Promise<void> => {
+      await wrapped(req, res);
     };
   };
 
   // Helper: extract a string path param (Express 5 params can be string | string[]).
   const param = (req: Request, name: string): string => String(req.params[name] ?? "");
-  const resolveDiscordDisplayName = (user: DiscordUser): string => user.global_name?.trim() || user.username;
-  const resolveDisplayName = (user: AuthenticatedPazaakUser): string => user.displayName;
 
-  const normalizeSideboardTokens = (value: unknown): string[] => {
+  app.use(
+    "/api/trask",
+    createTraskHttpRouter({
+      runtime: opts.trask,
+      auth: { requireAuth: withAuth },
+    }),
+  );
+
+  const normalizeSideboardTokens = (value: JsonValue | undefined): string[] => {
     if (!Array.isArray(value) || value.length !== SIDE_DECK_SIZE) {
       throw Object.assign(new Error(`Body must include exactly ${SIDE_DECK_SIZE} sideboard tokens.`), { status: 422 });
     }
 
-    return value.map((token, index) => {
+    const tokens = value.map((token, index) => {
       if (typeof token !== "string") {
         throw Object.assign(new Error(`Token ${index + 1} must be a string.`), { status: 422 });
       }
@@ -454,9 +442,82 @@ export function createApiServer(
 
       return normalized;
     });
+
+    try {
+      assertCustomSideDeckTokenLimits(tokens);
+    } catch (err) {
+      throw Object.assign(err instanceof Error ? err : new Error(String(err)), { status: 422 });
+    }
+
+    return tokens;
   };
 
-  const parseAiDifficulty = (value: unknown): AiDifficulty => {
+  const normalizeOwnedSideDeckTokens = (tokens: readonly string[] | undefined): string[] => {
+    return (tokens ?? []).flatMap((token) => {
+      if (typeof token !== "string") {
+        return [];
+      }
+
+      const normalized = normalizeSideDeckToken(token);
+      return normalized ? [normalized] : [];
+    });
+  };
+
+  const countSideDeckTokens = (tokens: readonly string[]): Map<string, number> => {
+    const counts = new Map<string, number>();
+
+    for (const token of tokens) {
+      counts.set(token, (counts.get(token) ?? 0) + 1);
+    }
+
+    return counts;
+  };
+
+  const buildMissingOwnedTokenMessage = (tokens: readonly string[], ownedTokens: readonly string[]): string => {
+    const requestedCounts = countSideDeckTokens(tokens);
+    const ownedCounts = countSideDeckTokens(ownedTokens);
+    const missing: string[] = [];
+
+    for (const [token, requestedCount] of requestedCounts.entries()) {
+      const ownedCount = ownedCounts.get(token) ?? 0;
+
+      if (ownedCount < requestedCount) {
+        missing.push(`${token} x${requestedCount - ownedCount}`);
+      }
+    }
+
+    return missing.length > 0
+      ? `This sideboard uses locked cards. Missing unlocks: ${missing.join(", ")}.`
+      : "This sideboard uses cards that are not unlocked on this account.";
+  };
+
+  const assertSideboardTokensUnlocked = async (userId: string, displayName: string, tokens: readonly string[]): Promise<string[]> => {
+    const wallet = await opts.walletRepository.getWallet(userId, displayName);
+    const ownedTokens = normalizeOwnedSideDeckTokens(wallet.ownedSideDeckTokens);
+    const requestedCounts = countSideDeckTokens(tokens);
+    const ownedCounts = countSideDeckTokens(ownedTokens);
+
+    for (const [token, requestedCount] of requestedCounts.entries()) {
+      if ((ownedCounts.get(token) ?? 0) < requestedCount) {
+        throw Object.assign(new Error(buildMissingOwnedTokenMessage(tokens, ownedTokens)), { status: 409 });
+      }
+    }
+
+    return ownedTokens;
+  };
+
+  const withOwnedSideDeckTokens = async <T extends { sideboards: object }>(payload: T, userId: string, displayName: string): Promise<T & { sideboards: T["sideboards"] & { ownedSideDeckTokens: string[] } }> => {
+    const wallet = await opts.walletRepository.getWallet(userId, displayName);
+    return {
+      ...payload,
+      sideboards: {
+        ...payload.sideboards,
+        ownedSideDeckTokens: normalizeOwnedSideDeckTokens(wallet.ownedSideDeckTokens),
+      },
+    };
+  };
+
+  const parseAiDifficulty = (value: JsonValue | undefined): AiDifficulty => {
     if (value === "easy" || value === "hard" || value === "professional") {
       return value;
     }
@@ -464,21 +525,174 @@ export function createApiServer(
     throw Object.assign(new Error("AI difficulty must be easy, hard, or professional."), { status: 422 });
   };
 
-  const parseThemePreference = (value: unknown): PazaakThemePreference | undefined => {
-    if (value === undefined) return undefined;
-    if (value === "kotor" || value === "modern" || value === "adaptive") return value;
-    throw Object.assign(new Error("Theme must be kotor, modern, or adaptive."), { status: 422 });
+  const parseLobbySideboardMode = (value: JsonValue | undefined): PazaakLobbySideboardMode => {
+    if (value === "player_active_custom" || value === "host_mirror_custom") {
+      return value;
+    }
+    return "runtime_random";
+  };
+
+  const PAZAAK_TABLE_THEMES = [
+    "ebon-hawk",
+    "coruscant",
+    "tatooine",
+    "manaan",
+    "dantooine",
+    "malachor",
+  ] as const satisfies readonly PazaakTableTheme[];
+
+  const PAZAAK_CARD_BACK_STYLES = ["classic", "holographic", "mandalorian", "republic", "sith"] as const satisfies readonly PazaakCardBackStyle[];
+
+  const PAZAAK_TABLE_AMBIENCES = ["cantina", "ebon-hawk", "jedi-archives", "outer-rim", "sith-sanctum"] as const satisfies readonly PazaakTableAmbience[];
+
+  const PAZAAK_SOUND_THEMES = ["default", "cantina", "droid", "force"] as const satisfies readonly PazaakSoundTheme[];
+
+  const PAZAAK_CHAT_AUDIENCES = ["everyone", "guild", "silent"] as const satisfies readonly PazaakChatAudience[];
+
+  const parseLiteral = <T extends string>(allowed: readonly T[], value: JsonValue | undefined): T | undefined => {
+    if (typeof value !== "string") {
+      return undefined;
+    }
+
+    return (allowed as readonly string[]).includes(value) ? (value as T) : undefined;
+  };
+
+  const parseUserSettingsPartial = (body: Record<string, JsonValue>): Partial<PazaakUserSettings> => {
+    const settings: Partial<PazaakUserSettings> = {};
+
+    const tableTheme =
+      parseLiteral(PAZAAK_TABLE_THEMES, body.tableTheme)
+      ?? parseLiteral(PAZAAK_TABLE_THEMES, body.theme); // legacy alias used by older clients/tests
+    if (tableTheme !== undefined) {
+      settings.tableTheme = tableTheme;
+    }
+
+    const cardBack = parseLiteral(PAZAAK_CARD_BACK_STYLES, body.cardBackStyle);
+    if (cardBack !== undefined) {
+      settings.cardBackStyle = cardBack;
+    }
+
+    const ambience = parseLiteral(PAZAAK_TABLE_AMBIENCES, body.tableAmbience);
+    if (ambience !== undefined) {
+      settings.tableAmbience = ambience;
+    }
+
+    const soundTheme = parseLiteral(PAZAAK_SOUND_THEMES, body.soundTheme);
+    if (soundTheme !== undefined) {
+      settings.soundTheme = soundTheme;
+    }
+
+    const chatAudience = parseLiteral(PAZAAK_CHAT_AUDIENCES, body.chatAudience);
+    if (chatAudience !== undefined) {
+      settings.chatAudience = chatAudience;
+    }
+
+    if (typeof body.soundEnabled === "boolean") {
+      settings.soundEnabled = body.soundEnabled;
+    }
+
+    if (typeof body.reducedMotionEnabled === "boolean") {
+      settings.reducedMotionEnabled = body.reducedMotionEnabled;
+    }
+
+    if (typeof body.turnTimerSeconds === "number") {
+      settings.turnTimerSeconds = Math.max(10, Math.min(300, Math.trunc(body.turnTimerSeconds)));
+    }
+
+    if (body.preferredAiDifficulty !== undefined) {
+      settings.preferredAiDifficulty = parseAiDifficulty(body.preferredAiDifficulty);
+    }
+
+    if (typeof body.confirmForfeit === "boolean") {
+      settings.confirmForfeit = body.confirmForfeit;
+    }
+
+    if (typeof body.highlightValidPlays === "boolean") {
+      settings.highlightValidPlays = body.highlightValidPlays;
+    }
+
+    if (typeof body.focusMode === "boolean") {
+      settings.focusMode = body.focusMode;
+    }
+
+    if (typeof body.showRatingsInGame === "boolean") {
+      settings.showRatingsInGame = body.showRatingsInGame;
+    }
+
+    if (typeof body.showGuildEmblems === "boolean") {
+      settings.showGuildEmblems = body.showGuildEmblems;
+    }
+
+    if (typeof body.showHolocronStreaks === "boolean") {
+      settings.showHolocronStreaks = body.showHolocronStreaks;
+    }
+
+    if (typeof body.showPostMatchDebrief === "boolean") {
+      settings.showPostMatchDebrief = body.showPostMatchDebrief;
+    }
+
+    return settings;
+  };
+
+  const createSavedSideboardDeckChoice = (tokens: readonly string[], label: string): SideDeckChoice => ({
+    tokens: [...tokens],
+    label,
+    enforceTokenLimits: true,
+  });
+
+  const resolveLobbyDeckChoices = async (
+    lobby: PazaakLobbyRecord,
+    challenger: PazaakLobbyRecord["players"][number],
+    opponent: PazaakLobbyRecord["players"][number],
+  ): Promise<{ challengerDeck: SideDeckChoice | undefined; opponentDeck: SideDeckChoice | undefined }> => {
+    const mode = lobby.tableSettings.sideboardMode;
+
+    if (mode === "runtime_random") {
+      return { challengerDeck: undefined, opponentDeck: undefined };
+    }
+
+    if (mode === "host_mirror_custom") {
+      const hostSideboard = await opts.sideboardRepository.getSideboard(lobby.hostUserId);
+      if (!hostSideboard) {
+        throw Object.assign(new Error("Host must set an active custom sideboard before starting host-mirrored custom mode."), { status: 409 });
+      }
+
+      const label = `Host mirror: ${hostSideboard.name}`;
+      return {
+        challengerDeck: createSavedSideboardDeckChoice(hostSideboard.tokens, label),
+        opponentDeck: createSavedSideboardDeckChoice(hostSideboard.tokens, label),
+      };
+    }
+
+    const resolveSeatDeck = async (player: PazaakLobbyRecord["players"][number]): Promise<SideDeckChoice | undefined> => {
+      if (player.isAi) {
+        return undefined;
+      }
+
+      const sideboard = await opts.sideboardRepository.getSideboard(player.userId);
+      if (!sideboard) {
+        throw Object.assign(new Error(`${player.displayName} must set an active custom sideboard before starting this lobby mode.`), { status: 409 });
+      }
+
+      return createSavedSideboardDeckChoice(sideboard.tokens, `${player.displayName}: ${sideboard.name}`);
+    };
+
+    return {
+      challengerDeck: await resolveSeatDeck(challenger),
+      opponentDeck: await resolveSeatDeck(opponent),
+    };
   };
 
   type PendingOauthState = {
     provider: SocialAuthProvider;
     expiresAt: number;
     accountId?: string;
+    pendingMatchId?: string;
   };
 
   const oauthStateStore = new Map<string, PendingOauthState>();
   const OAUTH_STATE_TTL_MS = 1000 * 60 * 10;
-  const oauthLandingBase = opts.publicWebOrigin?.trim() || "http://localhost:5173";
+  const oauthLandingBase = normalizePublicWebUrl(opts.publicWebOrigin);
 
   const cleanupOauthState = (): void => {
     const now = Date.now();
@@ -489,13 +703,14 @@ export function createApiServer(
     }
   };
 
-  const createOauthState = (provider: SocialAuthProvider, accountId?: string): string => {
+  const createOauthState = (provider: SocialAuthProvider, accountId?: string, pendingMatchId?: string): string => {
     cleanupOauthState();
     const state = randomUUID().replace(/-/g, "");
     oauthStateStore.set(state, {
       provider,
       expiresAt: Date.now() + OAUTH_STATE_TTL_MS,
       ...(accountId ? { accountId } : {}),
+      ...(pendingMatchId ? { pendingMatchId } : {}),
     });
     return state;
   };
@@ -513,161 +728,48 @@ export function createApiServer(
   };
 
   const resolveCallbackUrl = (provider: SocialAuthProvider, configured: string): string => {
-    if (configured) {
-      return configured;
+    const configuredCallbackUrl = configured.trim();
+    if (configuredCallbackUrl && (!isLocalhostUrl(configuredCallbackUrl) || isLocalhostUrl(oauthLandingBase))) {
+      return configuredCallbackUrl;
     }
-    return `${oauthLandingBase.replace(/\/$/u, "")}/api/auth/oauth/${provider}/callback`;
+    return `${oauthLandingBase}/api/auth/oauth/${provider}/callback`;
   };
 
   const fetchGoogleProfile = async (code: string): Promise<{ providerUserId: string; username: string; displayName: string; email: string | null }> => {
     const config = resolveOauthConfig("google");
-    const callbackUrl = resolveCallbackUrl("google", config.callbackUrl);
-    const tokenRes = await fetch("https://oauth2.googleapis.com/token", {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({
-        code,
-        client_id: config.clientId,
-        client_secret: config.clientSecret,
-        redirect_uri: callbackUrl,
-        grant_type: "authorization_code",
-      }),
+    return fetchGoogleSocialAuthProfile(code, {
+      clientId: config.clientId,
+      clientSecret: config.clientSecret,
+      redirectUri: resolveCallbackUrl("google", config.callbackUrl),
     });
-
-    if (!tokenRes.ok) {
-      const message = await tokenRes.text();
-      throw Object.assign(new Error(`Google token exchange failed: ${message}`), { status: 401 });
-    }
-
-    const tokenBody = await tokenRes.json() as { access_token?: string };
-    const accessToken = tokenBody.access_token;
-    if (!accessToken) {
-      throw Object.assign(new Error("Google token response did not include an access token."), { status: 401 });
-    }
-
-    const profileRes = await fetch("https://openidconnect.googleapis.com/v1/userinfo", {
-      headers: { Authorization: `Bearer ${accessToken}` },
-    });
-    if (!profileRes.ok) {
-      const message = await profileRes.text();
-      throw Object.assign(new Error(`Google profile fetch failed: ${message}`), { status: 401 });
-    }
-
-    const profile = await profileRes.json() as GoogleUser;
-    return {
-      providerUserId: profile.sub,
-      username: profile.email?.split("@")[0] || profile.name || "google-user",
-      displayName: profile.name || profile.given_name || profile.email || "Google User",
-      email: profile.email?.trim() || null,
-    };
   };
 
   const fetchDiscordProfile = async (code: string): Promise<{ providerUserId: string; username: string; displayName: string; email: string | null }> => {
     const config = resolveOauthConfig("discord");
-    const callbackUrl = resolveCallbackUrl("discord", config.callbackUrl);
-    const tokenRes = await fetch(`${DISCORD_API}/oauth2/token`, {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({
-        code,
-        client_id: config.clientId,
-        client_secret: config.clientSecret,
-        redirect_uri: callbackUrl,
-        grant_type: "authorization_code",
+    return fetchDiscordSocialAuthProfile(code, {
+      clientId: config.clientId,
+      clientSecret: config.clientSecret,
+      redirectUri: resolveCallbackUrl("discord", config.callbackUrl),
+    }, {
+      discordApiBase: DISCORD_API,
+      resolveDisplayName: ({ username, global_name }) => resolveDiscordDisplayName({
+        id: "",
+        username,
+        global_name,
+        discriminator: "0",
       }),
     });
-
-    if (!tokenRes.ok) {
-      const message = await tokenRes.text();
-      throw Object.assign(new Error(`Discord token exchange failed: ${message}`), { status: 401 });
-    }
-
-    const tokenBody = await tokenRes.json() as { access_token?: string };
-    const accessToken = tokenBody.access_token;
-    if (!accessToken) {
-      throw Object.assign(new Error("Discord token response did not include an access token."), { status: 401 });
-    }
-
-    const profileRes = await fetch(`${DISCORD_API}/users/@me`, {
-      headers: { Authorization: `Bearer ${accessToken}` },
-    });
-    if (!profileRes.ok) {
-      const message = await profileRes.text();
-      throw Object.assign(new Error(`Discord profile fetch failed: ${message}`), { status: 401 });
-    }
-
-    const profile = await profileRes.json() as DiscordUser & { email?: string | null };
-    return {
-      providerUserId: profile.id,
-      username: profile.username,
-      displayName: resolveDiscordDisplayName(profile),
-      email: profile.email?.trim() || null,
-    };
   };
 
   const fetchGithubProfile = async (code: string): Promise<{ providerUserId: string; username: string; displayName: string; email: string | null }> => {
     const config = resolveOauthConfig("github");
-    const callbackUrl = resolveCallbackUrl("github", config.callbackUrl);
-    const tokenRes = await fetch("https://github.com/login/oauth/access_token", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/x-www-form-urlencoded",
-        Accept: "application/json",
-      },
-      body: new URLSearchParams({
-        code,
-        client_id: config.clientId,
-        client_secret: config.clientSecret,
-        redirect_uri: callbackUrl,
-      }),
+    return fetchGithubSocialAuthProfile(code, {
+      clientId: config.clientId,
+      clientSecret: config.clientSecret,
+      redirectUri: resolveCallbackUrl("github", config.callbackUrl),
+    }, {
+      userAgent: "PazaakWorld/1.0",
     });
-
-    if (!tokenRes.ok) {
-      const message = await tokenRes.text();
-      throw Object.assign(new Error(`GitHub token exchange failed: ${message}`), { status: 401 });
-    }
-
-    const tokenBody = await tokenRes.json() as { access_token?: string };
-    const accessToken = tokenBody.access_token;
-    if (!accessToken) {
-      throw Object.assign(new Error("GitHub token response did not include an access token."), { status: 401 });
-    }
-
-    const profileRes = await fetch("https://api.github.com/user", {
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        Accept: "application/vnd.github+json",
-      },
-    });
-    if (!profileRes.ok) {
-      const message = await profileRes.text();
-      throw Object.assign(new Error(`GitHub profile fetch failed: ${message}`), { status: 401 });
-    }
-
-    const profile = await profileRes.json() as GithubUser;
-    let email = profile.email?.trim() || null;
-    if (!email) {
-      const emailsRes = await fetch("https://api.github.com/user/emails", {
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-          Accept: "application/vnd.github+json",
-        },
-      });
-      if (emailsRes.ok) {
-        const emails = await emailsRes.json() as Array<{ email: string; primary?: boolean; verified?: boolean }>;
-        email = emails.find((entry) => entry.primary && entry.verified)?.email
-          ?? emails.find((entry) => entry.verified)?.email
-          ?? emails[0]?.email
-          ?? null;
-      }
-    }
-
-    return {
-      providerUserId: String(profile.id),
-      username: profile.login,
-      displayName: profile.name || profile.login,
-      email,
-    };
   };
 
   const settleCompletedMatch = async (match: PazaakMatch): Promise<void> => {
@@ -675,13 +777,25 @@ export function createApiServer(
       return;
     }
 
-    await opts.walletRepository.recordMatch({
+    const preWinner = await opts.walletRepository.getWallet(match.winnerId, match.winnerName);
+    const preLoser = await opts.walletRepository.getWallet(match.loserId, match.loserName);
+
+    const { winner } = await opts.walletRepository.recordMatch({
       winnerId: match.winnerId,
       winnerName: match.winnerName,
       loserId: match.loserId,
       loserName: match.loserName,
       wager: match.wager,
     });
+
+    const loserWallet = await opts.walletRepository.getWallet(match.loserId, match.loserName);
+    const milestoneUpdates = buildMatchMilestoneUpdates(preWinner, preLoser, winner, loserWallet);
+    await opts.walletRepository.applyMatchProgressionDeltas(milestoneUpdates);
+
+    const streakBonus = pickWinStreakBonusToken(winner.streak);
+    if (streakBonus) {
+      await opts.walletRepository.addOwnedSideDeckTokens(match.winnerId, match.winnerName, [streakBonus]);
+    }
     await opts.matchHistoryRepository.append({
       matchId: match.id,
       channelId: match.channelId,
@@ -705,6 +819,80 @@ export function createApiServer(
   };
 
   let backgroundTickRunning = false;
+  const aiMoveDueAtByStateKey = new Map<string, number>();
+
+  const getAiMoveStateKey = (match: PazaakMatch): string | null => {
+    if (match.phase === "completed") {
+      return null;
+    }
+
+    const activePlayer = playerAt(match, match.activePlayerIndex);
+    const difficulty = match.aiSeats?.[activePlayer.userId];
+    if (!difficulty) {
+      return null;
+    }
+
+    return [
+      match.id,
+      activePlayer.userId,
+      difficulty,
+      match.phase,
+      match.turnStartedAt,
+      activePlayer.total,
+      activePlayer.board.length,
+      activePlayer.sideCardsPlayed.length,
+    ].join(":");
+  };
+
+  const clearAiMoveSchedulesForMatch = (matchId: string): void => {
+    for (const key of aiMoveDueAtByStateKey.keys()) {
+      if (key.startsWith(`${matchId}:`)) {
+        aiMoveDueAtByStateKey.delete(key);
+      }
+    }
+  };
+
+  const tickAiSeats = (now: number): PazaakMatch[] => {
+    const updates: PazaakMatch[] = [];
+
+    for (const match of coordinator.getActiveMatches()) {
+      const activePlayer = playerAt(match, match.activePlayerIndex);
+      const difficulty = match.aiSeats?.[activePlayer.userId];
+      if (!difficulty || match.phase === "completed") {
+        continue;
+      }
+
+      const stateKey = getAiMoveStateKey(match);
+      if (!stateKey) {
+        continue;
+      }
+
+      let dueAt = aiMoveDueAtByStateKey.get(stateKey);
+      if (dueAt === undefined) {
+        try {
+          dueAt = now + coordinator.recommendAiMove(match.id, activePlayer.userId, difficulty).delayMs;
+          aiMoveDueAtByStateKey.set(stateKey, dueAt);
+        } catch {
+          aiMoveDueAtByStateKey.delete(stateKey);
+        }
+        continue;
+      }
+
+      if (dueAt > now) {
+        continue;
+      }
+
+      try {
+        const update = coordinator.executeAiMove(match.id, activePlayer.userId, difficulty);
+        clearAiMoveSchedulesForMatch(match.id);
+        updates.push(update);
+      } catch {
+        aiMoveDueAtByStateKey.delete(stateKey);
+      }
+    }
+
+    return updates;
+  };
 
   const runBackgroundTick = async (): Promise<void> => {
     if (backgroundTickRunning) {
@@ -715,16 +903,20 @@ export function createApiServer(
 
     try {
       const now = Date.now();
+      const aiUpdates = tickAiSeats(now);
       const timerUpdates = coordinator.tickTurnTimers(now);
       const disconnectUpdates = coordinator.tickDisconnectForfeits(now);
       const updatesByMatchId = new Map<string, PazaakMatch>();
 
-      for (const update of [...timerUpdates, ...disconnectUpdates]) {
+      for (const update of [...aiUpdates, ...timerUpdates, ...disconnectUpdates]) {
         updatesByMatchId.set(update.id, update);
       }
 
       for (const update of updatesByMatchId.values()) {
         await settleCompletedMatch(update);
+        if (update.phase === "completed") {
+          clearAiMoveSchedulesForMatch(update.id);
+        }
         hub.broadcast(update);
       }
 
@@ -842,7 +1034,7 @@ export function createApiServer(
   });
 
   app.post("/api/auth/register", async (req, res): Promise<void> => {
-    const body = req.body as { username?: unknown; displayName?: unknown; email?: unknown; password?: unknown };
+    const body = req.body as JsonObject & { username?: JsonValue; displayName?: JsonValue; email?: JsonValue; password?: JsonValue };
     const username = typeof body.username === "string" ? body.username.trim() : "";
     const displayName = typeof body.displayName === "string" ? body.displayName.trim() : undefined;
     const email = typeof body.email === "string" ? body.email.trim() : undefined;
@@ -876,7 +1068,7 @@ export function createApiServer(
   });
 
   app.post("/api/auth/login", async (req, res): Promise<void> => {
-    const body = req.body as { identifier?: unknown; username?: unknown; password?: unknown };
+    const body = req.body as JsonObject & { identifier?: JsonValue; username?: JsonValue; password?: JsonValue };
     const identifier = typeof body.identifier === "string"
       ? body.identifier.trim()
       : typeof body.username === "string"
@@ -926,7 +1118,7 @@ export function createApiServer(
   }));
 
   app.post("/api/auth/discord/link", withAuth(async (req, res, user) => {
-    const { access_token: accessToken } = req.body as { access_token?: unknown };
+    const { access_token: accessToken } = req.body as { access_token?: JsonValue };
 
     if (typeof accessToken !== "string" || !accessToken) {
       res.status(422).json({ error: "Body must include a Discord access_token." });
@@ -961,6 +1153,14 @@ export function createApiServer(
     res.status(204).end();
   });
 
+  app.get("/api/config/public", (_req, res) => {
+    res.json(toPublicConfig(opts.opsPolicy ?? cloneDefaultPolicy()));
+  });
+
+  app.get("/api/cardworld/config", (_req, res) => {
+    res.json(cardWorldConfig);
+  });
+
   app.get("/api/ui/main-menu", (_req, res) => {
     res.json({
       preset: MAIN_MENU_PRESET,
@@ -977,58 +1177,27 @@ export function createApiServer(
 
   app.get("/api/auth/oauth/providers", (_req, res) => {
     res.json({
-      providers: SOCIAL_PROVIDERS.map((provider) => ({
-        provider,
-        enabled: resolveOauthConfig(provider).enabled,
-      })),
+      providers: listSocialAuthProviders(envLookup, oauthConfigOptions),
     });
   });
 
   const buildProviderAuthorizeUrl = (provider: SocialAuthProvider, state: string): string => {
     const config = resolveOauthConfig(provider);
-    const callbackUrl = resolveCallbackUrl(provider, config.callbackUrl);
-
-    if (config.startUrl) {
-      return config.startUrl
-        .replaceAll("{state}", encodeURIComponent(state))
-        .replaceAll("{callback}", encodeURIComponent(callbackUrl))
-        .replaceAll("{clientId}", encodeURIComponent(config.clientId));
-    }
-
-    if (provider === "google") {
-      const url = new URL("https://accounts.google.com/o/oauth2/v2/auth");
-      url.searchParams.set("client_id", config.clientId);
-      url.searchParams.set("redirect_uri", callbackUrl);
-      url.searchParams.set("response_type", "code");
-      url.searchParams.set("scope", "openid profile email");
-      url.searchParams.set("access_type", "online");
-      url.searchParams.set("prompt", "select_account");
-      url.searchParams.set("state", state);
-      return url.toString();
-    }
-
-    if (provider === "discord") {
-      const url = new URL(`${DISCORD_API}/oauth2/authorize`);
-      url.searchParams.set("client_id", config.clientId);
-      url.searchParams.set("redirect_uri", callbackUrl);
-      url.searchParams.set("response_type", "code");
-      url.searchParams.set("scope", "identify email");
-      url.searchParams.set("prompt", "consent");
-      url.searchParams.set("state", state);
-      return url.toString();
-    }
-
-    const url = new URL("https://github.com/login/oauth/authorize");
-    url.searchParams.set("client_id", config.clientId);
-    url.searchParams.set("redirect_uri", callbackUrl);
-    url.searchParams.set("scope", "read:user user:email");
-    url.searchParams.set("state", state);
-    return url.toString();
+    return buildSocialAuthAuthorizeUrl(provider, {
+      clientId: config.clientId,
+      redirectUri: resolveCallbackUrl(provider, config.callbackUrl),
+      state,
+      ...(config.startUrl ? { startUrl: config.startUrl } : {}),
+    }, {
+      discordApiBase: DISCORD_API,
+      ...(provider === "google" ? { googlePrompt: "select_account" } : {}),
+      ...(provider === "discord" ? { discordPrompt: "consent" } : {}),
+    });
   };
 
   app.post("/api/auth/oauth/:provider/start", async (req, res) => {
     const providerParam = (req.params.provider ?? "").toLowerCase();
-    if (!SOCIAL_PROVIDERS.includes(providerParam as SocialAuthProvider)) {
+    if (!SOCIAL_AUTH_PROVIDERS.includes(providerParam as SocialAuthProvider)) {
       res.status(404).json({ error: "Unsupported OAuth provider." });
       return;
     }
@@ -1044,13 +1213,20 @@ export function createApiServer(
 
     let accountId: string | undefined;
     try {
-      const user = await resolveAuthenticatedUser(req.headers.authorization);
-      accountId = user.accountId;
+      const user = await resolveOptionalWithAuthResolvers(
+        req.headers.authorization,
+        authResolvers,
+        "Invalid Discord access token.",
+      );
+      accountId = user?.accountId;
     } catch {
       // Continue as login flow for anonymous users.
     }
 
-    const state = createOauthState(provider, accountId);
+    const body = req.body as { matchId?: JsonValue };
+    const pendingMatchId = typeof body.matchId === "string" && body.matchId.trim() ? body.matchId.trim() : undefined;
+
+    const state = createOauthState(provider, accountId, pendingMatchId);
     const redirectUrl = buildProviderAuthorizeUrl(provider, state);
 
     res.json({ provider, redirectUrl });
@@ -1058,7 +1234,7 @@ export function createApiServer(
 
   app.get("/api/auth/oauth/:provider/callback", async (req, res) => {
     const providerParam = (req.params.provider ?? "").toLowerCase();
-    if (!SOCIAL_PROVIDERS.includes(providerParam as SocialAuthProvider)) {
+    if (!SOCIAL_AUTH_PROVIDERS.includes(providerParam as SocialAuthProvider)) {
       res.status(404).send("Unsupported OAuth provider.");
       return;
     }
@@ -1112,6 +1288,7 @@ export function createApiServer(
         redirect.searchParams.set("oauth_app_token", appToken);
         redirect.searchParams.set("oauth_username", account.displayName);
         redirect.searchParams.set("oauth_user_id", resolveGameUserId(account));
+        if (pending.pendingMatchId) redirect.searchParams.set("matchId", pending.pendingMatchId);
         res.redirect(302, redirect.toString());
         return;
       }
@@ -1133,6 +1310,7 @@ export function createApiServer(
       redirect.searchParams.set("oauth_app_token", appToken);
       redirect.searchParams.set("oauth_username", ensured.account.displayName);
       redirect.searchParams.set("oauth_user_id", resolveGameUserId(ensured.account));
+      if (pending.pendingMatchId) redirect.searchParams.set("matchId", pending.pendingMatchId);
       res.redirect(302, redirect.toString());
     } catch (err) {
       redirect.searchParams.set("oauth_error", err instanceof Error ? err.message : String(err));
@@ -1154,24 +1332,24 @@ export function createApiServer(
 
   app.put("/api/settings", withAuth(async (req, res, user) => {
     try {
-      const body = req.body as {
-        theme?: unknown;
-        soundEnabled?: unknown;
-        reducedMotionEnabled?: unknown;
-        turnTimerSeconds?: unknown;
-        preferredAiDifficulty?: unknown;
-      };
-      const settings: Parameters<JsonWalletRepository["updateUserSettings"]>[2] = {};
-      const theme = parseThemePreference(body.theme);
-
-      if (theme !== undefined) settings.theme = theme;
-      if (typeof body.soundEnabled === "boolean") settings.soundEnabled = body.soundEnabled;
-      if (typeof body.reducedMotionEnabled === "boolean") settings.reducedMotionEnabled = body.reducedMotionEnabled;
-      if (typeof body.turnTimerSeconds === "number") settings.turnTimerSeconds = Math.max(10, Math.min(300, Math.trunc(body.turnTimerSeconds)));
-      if (body.preferredAiDifficulty !== undefined) settings.preferredAiDifficulty = parseAiDifficulty(body.preferredAiDifficulty);
+      const body = req.body as Record<string, JsonValue>;
+      const settings = parseUserSettingsPartial(body);
 
       const wallet = await opts.walletRepository.updateUserSettings(user.id, resolveDisplayName(user), settings);
       res.json({ settings: wallet.userSettings, wallet });
+    } catch (err) {
+      const status = (err as { status?: number }).status ?? 400;
+      res.status(status).json({ error: err instanceof Error ? err.message : String(err) });
+    }
+  }));
+
+  app.post("/api/crates/open", withAuth(async (req, res, user) => {
+    try {
+      const kindRaw = (req.body as { kind?: JsonValue }).kind;
+      const kind = kindRaw === "premium" ? "premium" : "standard";
+      const rolled = rollCrateContents(kind);
+      const wallet = await opts.walletRepository.consumeCrateAndApplyDrops(user.id, resolveDisplayName(user), kind, rolled);
+      res.json({ wallet, opened: rolled, kind });
     } catch (err) {
       const status = (err as { status?: number }).status ?? 400;
       res.status(status).json({ error: err instanceof Error ? err.message : String(err) });
@@ -1205,7 +1383,7 @@ export function createApiServer(
 
   app.post("/api/matchmaking/enqueue", withAuth(async (req, res, user) => {
     const wallet = await opts.walletRepository.getWallet(user.id, resolveDisplayName(user));
-    const preferredMaxPlayers = Number((req.body as { preferredMaxPlayers?: unknown }).preferredMaxPlayers ?? 2);
+    const preferredMaxPlayers = Number((req.body as { preferredMaxPlayers?: JsonValue }).preferredMaxPlayers ?? 2);
     const queue = await opts.matchmakingQueueRepository.enqueue({
       userId: user.id,
       displayName: resolveDisplayName(user),
@@ -1256,15 +1434,17 @@ export function createApiServer(
 
   app.post("/api/lobbies", withAuth(async (req, res, user) => {
     const body = req.body as {
-      name?: unknown;
-      maxPlayers?: unknown;
-      password?: unknown;
-      variant?: unknown;
+      name?: JsonValue;
+      maxPlayers?: JsonValue;
+      password?: JsonValue;
+      variant?: JsonValue;
       tableSettings?: Partial<PazaakTableSettings> | undefined;
-      maxRounds?: unknown;
-      turnTimerSeconds?: unknown;
-      ranked?: unknown;
-      allowAiFill?: unknown;
+      maxRounds?: JsonValue;
+      turnTimerSeconds?: JsonValue;
+      ranked?: JsonValue;
+      allowAiFill?: JsonValue;
+      sideboardMode?: JsonValue;
+      gameMode?: JsonValue;
     };
 
     const maxPlayers = Number(body.maxPlayers ?? 2);
@@ -1285,6 +1465,10 @@ export function createApiServer(
     if (typeof body.allowAiFill === "boolean") {
       tableSettings.allowAiFill = body.allowAiFill;
     }
+    tableSettings.sideboardMode = parseLobbySideboardMode(body.sideboardMode ?? body.tableSettings?.sideboardMode);
+    const requestedGameMode = body.gameMode ?? body.tableSettings?.gameMode;
+    const rankedGuard = tableSettings.ranked === true;
+    tableSettings.gameMode = rankedGuard ? "canonical" : (requestedGameMode === "wacky" ? "wacky" : "canonical");
 
     const lobby = await opts.lobbyRepository.create({
       name: typeof body.name === "string" ? body.name : `${resolveDisplayName(user)}'s Table`,
@@ -1333,7 +1517,7 @@ export function createApiServer(
   }));
 
   app.post("/api/lobbies/:lobbyId/ready", withAuth(async (req, res, user) => {
-    const ready = (req.body as { ready?: unknown }).ready !== false;
+    const ready = (req.body as { ready?: JsonValue }).ready !== false;
     const lobby = await opts.lobbyRepository.setReady(param(req, "lobbyId"), user.id, ready);
     await broadcastLobbyState(lobby);
     res.json({ lobby });
@@ -1341,7 +1525,7 @@ export function createApiServer(
 
   app.post("/api/lobbies/:lobbyId/status", withAuth(async (req, res, user) => {
     try {
-      const statusRaw = (req.body as { status?: unknown }).status;
+      const statusRaw = (req.body as { status?: JsonValue }).status;
       const status = statusRaw === "matchmaking" ? "matchmaking" : "waiting";
       const lobby = await opts.lobbyRepository.setStatus(param(req, "lobbyId"), user.id, status);
       await broadcastLobbyState(lobby);
@@ -1354,7 +1538,7 @@ export function createApiServer(
 
   app.post("/api/lobbies/:lobbyId/addAi", withAuth(async (req, res, user) => {
     try {
-      const difficulty = parseAiDifficulty((req.body as { difficulty?: unknown }).difficulty ?? "professional");
+      const difficulty = parseAiDifficulty((req.body as { difficulty?: JsonValue }).difficulty ?? "professional");
       const lobby = await opts.lobbyRepository.addAi(param(req, "lobbyId"), user.id, difficulty);
       await broadcastLobbyState(lobby);
       res.json({ lobby });
@@ -1366,7 +1550,7 @@ export function createApiServer(
 
   app.post("/api/lobbies/:lobbyId/ai/:aiUserId/difficulty", withAuth(async (req, res, user) => {
     try {
-      const difficulty = parseAiDifficulty((req.body as { difficulty?: unknown }).difficulty ?? "professional");
+      const difficulty = parseAiDifficulty((req.body as { difficulty?: JsonValue }).difficulty ?? "professional");
       const lobby = await opts.lobbyRepository.updateAiDifficulty(
         param(req, "lobbyId"),
         user.id,
@@ -1414,13 +1598,22 @@ export function createApiServer(
       }
 
       const [challenger, opponent] = readyPlayers;
+      const deckChoices = await resolveLobbyDeckChoices(lobby, challenger!, opponent!);
+      const aiOpponent = opponent!.aiDifficulty ? getDefaultPazaakOpponentForAdvisorDifficulty(opponent!.aiDifficulty) : undefined;
+      const lobbyGameMode = lobby.tableSettings.gameMode === "wacky" && lobby.tableSettings.ranked !== true ? "wacky" : "canonical";
       const match = coordinator.createDirectMatch({
         channelId: `lobby:${lobby.id}`,
         challengerId: challenger!.userId,
         challengerName: challenger!.displayName,
+        challengerDeck: deckChoices.challengerDeck,
         opponentId: opponent!.userId,
-        opponentName: opponent!.displayName,
+        opponentName: aiOpponent?.name ?? opponent!.displayName,
+        opponentDeck: aiOpponent
+          ? { tokens: [...aiOpponent.sideDeckTokens], label: `${aiOpponent.name} Deck`, enforceTokenLimits: true }
+          : deckChoices.opponentDeck,
         opponentAiDifficulty: opponent!.aiDifficulty,
+        setsToWin: lobby.tableSettings.maxRounds,
+        gameMode: lobbyGameMode,
       });
       const updatedLobby = await opts.lobbyRepository.markInGame(lobby.id, match.id);
       hub.broadcast(match);
@@ -1448,9 +1641,9 @@ export function createApiServer(
 
   /**
    * GET /api/match/:matchId
-   * Returns a single match by ID.
+   * Returns a single match by ID. Accessible to unauthenticated spectators (read-only).
    */
-  app.get("/api/match/:matchId", withAuth((req, res) => {
+  app.get("/api/match/:matchId", withOptionalAuth((req, res) => {
     const match = coordinator.getMatch(param(req, "matchId"));
 
     if (!match) {
@@ -1467,7 +1660,7 @@ export function createApiServer(
    */
   app.get("/api/sideboards", withAuth(async (_req, res, user) => {
     const sideboards = await opts.sideboardRepository.listSideboards(user.id, resolveDisplayName(user));
-    res.json({ sideboards });
+    res.json(await withOwnedSideDeckTokens({ sideboards }, user.id, resolveDisplayName(user)));
   }));
 
   /**
@@ -1485,7 +1678,8 @@ export function createApiServer(
 
     try {
       const { makeActive } = req.body as { makeActive?: boolean };
-      const tokens = normalizeSideboardTokens((req.body as { tokens?: unknown }).tokens);
+      const tokens = normalizeSideboardTokens((req.body as { tokens?: JsonValue }).tokens);
+      await assertSideboardTokensUnlocked(user.id, resolveDisplayName(user), tokens);
       const sideboard = await opts.sideboardRepository.saveSideboard(
         user.id,
         resolveDisplayName(user),
@@ -1494,7 +1688,7 @@ export function createApiServer(
         makeActive ?? true,
       );
       const sideboards = await opts.sideboardRepository.listSideboards(user.id, resolveDisplayName(user));
-      res.json({ sideboard, sideboards });
+      res.json(await withOwnedSideDeckTokens({ sideboard, sideboards }, user.id, resolveDisplayName(user)));
     } catch (err) {
       const status = (err as { status?: number }).status ?? 400;
       res.status(status).json({ error: err instanceof Error ? err.message : String(err) });
@@ -1517,7 +1711,7 @@ export function createApiServer(
     try {
       const sideboard = await opts.sideboardRepository.setActiveSideboard(user.id, resolveDisplayName(user), name);
       const sideboards = await opts.sideboardRepository.listSideboards(user.id, resolveDisplayName(user));
-      res.json({ sideboard, sideboards });
+      res.json(await withOwnedSideDeckTokens({ sideboard, sideboards }, user.id, resolveDisplayName(user)));
     } catch (err) {
       res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
     }
@@ -1543,7 +1737,7 @@ export function createApiServer(
     }
 
     const sideboards = await opts.sideboardRepository.listSideboards(user.id, resolveDisplayName(user));
-    res.json({ sideboards });
+    res.json(await withOwnedSideDeckTokens({ sideboards }, user.id, resolveDisplayName(user)));
   }));
 
   /**
@@ -1669,8 +1863,11 @@ export function createApiServer(
     res.status(404).json({ error: "Not found." });
   });
 
-  const server = http.createServer(app);
-  const hub = new WsHub(server);
+  const host = createNodeApiHost({
+    requestListener: app,
+    createHub: (server) => new WsHub(server),
+  });
+  const { server, hub } = host;
   let backgroundInterval: NodeJS.Timeout | undefined;
 
   server.on("close", () => {
@@ -1684,7 +1881,7 @@ export function createApiServer(
     server,
     hub,
     listen: () => {
-      server.listen(opts.port, () => {
+      host.listen(opts.port, () => {
         console.info(`[pazaak-api] Listening on http://localhost:${opts.port}`);
       });
 

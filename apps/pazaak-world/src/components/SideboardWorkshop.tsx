@@ -1,39 +1,16 @@
 import { useCallback, useDeferredValue, useEffect, useState } from "react";
+import { PAZAAK_RULEBOOK, getCardReference } from "@openkotor/pazaak-engine";
 import type { SavedSideboardCollectionRecord } from "../types.ts";
-import { deleteSideboard, fetchSideboards, saveSideboard, setActiveSideboard } from "../api.ts";
+import { deleteSideboard, fetchMe, fetchSideboards, openRewardCrate, saveSideboard, setActiveSideboard } from "../api.ts";
 
 const DEFAULT_TOKENS = ["+1", "-2", "*3", "$$", "TT", "F1", "F2", "VV", "+4", "-5"];
-const SUPPORTED_TOKENS = [
-  "+1", "+2", "+3", "+4", "+5", "+6",
-  "-1", "-2", "-3", "-4", "-5", "-6",
-  "*1", "*2", "*3", "*4", "*5", "*6",
-  "$$", "TT", "F1", "F2", "VV",
-];
-const TOKEN_DESCRIPTIONS: Record<string, string> = {
-  "+1": "Fixed plus 1",
-  "+2": "Fixed plus 2",
-  "+3": "Fixed plus 3",
-  "+4": "Fixed plus 4",
-  "+5": "Fixed plus 5",
-  "+6": "Fixed plus 6",
-  "-1": "Fixed minus 1",
-  "-2": "Fixed minus 2",
-  "-3": "Fixed minus 3",
-  "-4": "Fixed minus 4",
-  "-5": "Fixed minus 5",
-  "-6": "Fixed minus 6",
-  "*1": "Flip plus/minus 1",
-  "*2": "Flip plus/minus 2",
-  "*3": "Flip plus/minus 3",
-  "*4": "Flip plus/minus 4",
-  "*5": "Flip plus/minus 5",
-  "*6": "Flip plus/minus 6",
-  "$$": "Copy previous",
-  "TT": "Tiebreaker",
-  "F1": "Flip 2 and 4",
-  "F2": "Flip 3 and 6",
-  "VV": "Value change",
-};
+const EMPTY_SLOT_TOKEN = "__locked__";
+const SUPPORTED_TOKENS = PAZAAK_RULEBOOK.cards.map((card) => card.token);
+const TOKEN_DESCRIPTIONS: Record<string, string> = Object.fromEntries(
+  PAZAAK_RULEBOOK.cards.map((card) => [card.token, `${card.displayLabel} — ${card.mechanic}`]),
+);
+const STANDARD_TOKEN_LIMIT = 4;
+const SPECIAL_TOKEN_LIMIT = 1;
 
 interface SideboardWorkshopProps {
   accessToken: string;
@@ -52,7 +29,13 @@ export function SideboardWorkshop({ accessToken, username, onBack }: SideboardWo
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [crateStandard, setCrateStandard] = useState(0);
+  const [cratePremium, setCratePremium] = useState(0);
+  const [openingCrate, setOpeningCrate] = useState(false);
   const deferredSearchQuery = useDeferredValue(searchQuery);
+  const ownedTokens = collection?.ownedSideDeckTokens ?? [];
+  const ownedTokenCounts = countTokens(ownedTokens);
+  const noUnlockedCards = ownedTokens.length === 0;
 
   const selectedSideboard = collection?.sideboards.find((sideboard) => sideboard.name === selectedName) ?? null;
   const normalizedDraftName = normalizeBoardName(draftName);
@@ -61,7 +44,7 @@ export function SideboardWorkshop({ accessToken, username, onBack }: SideboardWo
     return normalizedSearchQuery.length === 0 || sideboard.name.toLocaleLowerCase().includes(normalizedSearchQuery);
   }) ?? [];
   const tokenDirty = selectedSideboard === null
-    ? draftTokens.join("|") !== DEFAULT_TOKENS.join("|")
+    ? draftTokens.join("|") !== buildDefaultDraftTokens(ownedTokens).join("|")
     : draftTokens.join("|") !== selectedSideboard.tokens.join("|");
   const contentDirty = selectedSideboard === null
     ? normalizedDraftName.length > 0 || tokenDirty
@@ -71,6 +54,8 @@ export function SideboardWorkshop({ accessToken, username, onBack }: SideboardWo
   const selectedBoardVisible = selectedSideboard !== null
     ? filteredSideboards.some((sideboard) => sideboard.name === selectedSideboard.name)
     : false;
+  const validation = buildValidationSummary(draftTokens, ownedTokens);
+  const hasValidationErrors = validation.errors.length > 0;
 
   const syncDraft = useCallback((nextCollection: SavedSideboardCollectionRecord, nextSelectedName: string | null) => {
     setSelectedName(nextSelectedName);
@@ -84,7 +69,7 @@ export function SideboardWorkshop({ accessToken, username, onBack }: SideboardWo
     }
 
     setDraftName("");
-    setDraftTokens([...DEFAULT_TOKENS]);
+    setDraftTokens(buildDefaultDraftTokens(nextCollection.ownedSideDeckTokens));
   }, []);
 
   const loadSideboards = useCallback(async () => {
@@ -92,8 +77,10 @@ export function SideboardWorkshop({ accessToken, username, onBack }: SideboardWo
     setError(null);
 
     try {
-      const nextCollection = await fetchSideboards(accessToken);
+      const [nextCollection, me] = await Promise.all([fetchSideboards(accessToken), fetchMe(accessToken)]);
       setCollection(nextCollection);
+      setCrateStandard(me.wallet.unopenedCratesStandard ?? 0);
+      setCratePremium(me.wallet.unopenedCratesPremium ?? 0);
       const fallback = nextCollection.sideboards.find((sideboard) => sideboard.isActive)?.name
         ?? nextCollection.sideboards[0]?.name
         ?? null;
@@ -153,7 +140,7 @@ export function SideboardWorkshop({ accessToken, username, onBack }: SideboardWo
 
   const handleCreate = async () => {
     const nextName = createBoardName(selectedSideboard ? `${selectedSideboard.name} Copy` : "Workshop Board");
-    const nextTokens = selectedSideboard ? [...selectedSideboard.tokens] : [...DEFAULT_TOKENS];
+    const nextTokens = selectedSideboard ? [...selectedSideboard.tokens] : buildDefaultDraftTokens(collection?.ownedSideDeckTokens);
     await persistBoard(nextName, nextTokens, false, null);
     setNotice(`Created ${nextName}.`);
   };
@@ -168,6 +155,11 @@ export function SideboardWorkshop({ accessToken, username, onBack }: SideboardWo
 
     if (!selectedSideboard && hasNameConflict(targetName)) {
       setError(`A saved sideboard named ${targetName} already exists.`);
+      return;
+    }
+
+    if (hasValidationErrors) {
+      setError(validation.errors.join(" "));
       return;
     }
 
@@ -192,6 +184,11 @@ export function SideboardWorkshop({ accessToken, username, onBack }: SideboardWo
 
     if (hasNameConflict(normalizedDraftName, selectedSideboard.name)) {
       setError(`A saved sideboard named ${normalizedDraftName} already exists.`);
+      return;
+    }
+
+    if (hasValidationErrors) {
+      setError(validation.errors.join(" "));
       return;
     }
 
@@ -314,6 +311,26 @@ export function SideboardWorkshop({ accessToken, username, onBack }: SideboardWo
     onBack();
   };
 
+  const handleOpenCrate = async (kind: "standard" | "premium") => {
+    setOpeningCrate(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const result = await openRewardCrate(accessToken, kind);
+      setCrateStandard(result.wallet.unopenedCratesStandard ?? 0);
+      setCratePremium(result.wallet.unopenedCratesPremium ?? 0);
+      const cardLine = result.opened.tokens.length > 0 ? result.opened.tokens.join(", ") : "no card roll";
+      setNotice(`${kind === "premium" ? "Premium" : "Standard"} crate: ${cardLine} · +${result.opened.bonusCredits} credits`);
+      const nextCollection = await fetchSideboards(accessToken);
+      setCollection(nextCollection);
+      syncDraft(nextCollection, selectedName);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setOpeningCrate(false);
+    }
+  };
+
   useEffect(() => {
     if (!notice) {
       return;
@@ -341,7 +358,7 @@ export function SideboardWorkshop({ accessToken, username, onBack }: SideboardWo
     const handleKey = (event: KeyboardEvent) => {
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
         event.preventDefault();
-        if (!saving && contentDirty) {
+        if (!saving && contentDirty && !hasValidationErrors) {
           void handleSave(false);
         }
       }
@@ -349,9 +366,7 @@ export function SideboardWorkshop({ accessToken, username, onBack }: SideboardWo
 
     window.addEventListener("keydown", handleKey);
     return () => window.removeEventListener("keydown", handleKey);
-  }, [contentDirty, saving]);
-
-  const validation = buildValidationSummary(draftTokens);
+  }, [contentDirty, hasValidationErrors, saving]);
 
   return (
     <div className="screen screen--workshop">
@@ -407,6 +422,9 @@ export function SideboardWorkshop({ accessToken, username, onBack }: SideboardWo
                     ? `${filteredSideboards.length} of ${collection?.sideboards.length ?? 0} boards match.`
                     : `${collection?.sideboards.length ?? 0} saved boards available.`}
                 </p>
+                <p className="workshop-sidebar__count workshop-sidebar__count--muted">
+                  Unlocked cards: {ownedTokens.length === 0 ? "none" : `${ownedTokens.length} total`}
+                </p>
                 {selectedSideboard && normalizedSearchQuery.length > 0 && !selectedBoardVisible && (
                   <p className="workshop-sidebar__count workshop-sidebar__count--muted">
                     Still editing {selectedSideboard.name} outside the current filter.
@@ -432,6 +450,34 @@ export function SideboardWorkshop({ accessToken, username, onBack }: SideboardWo
             </aside>
 
             <section className="workshop-main">
+              <div className="workshop-toolbar" style={{ marginBottom: "0.75rem", flexWrap: "wrap", gap: "0.5rem" }}>
+                <div className="workshop-field" style={{ flex: "1 1 220px" }}>
+                  <span>Reward crates</span>
+                  <p className="workshop-toolbar__hint" style={{ margin: "0.25rem 0 0.5rem" }}>
+                    Earned every match — wins and losses both grant crates. Open for bonus cards and credits. Tiebreaker (TT) only unlocks at 10,000 wins.
+                  </p>
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: "0.5rem", alignItems: "center" }}>
+                    <span className="workshop-sidebar__count">Standard: {crateStandard}</span>
+                    <span className="workshop-sidebar__count">Premium: {cratePremium}</span>
+                    <button
+                      type="button"
+                      className="btn btn--secondary btn--sm"
+                      disabled={openingCrate || crateStandard < 1}
+                      onClick={() => void handleOpenCrate("standard")}
+                    >
+                      Open standard
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn--secondary btn--sm"
+                      disabled={openingCrate || cratePremium < 1}
+                      onClick={() => void handleOpenCrate("premium")}
+                    >
+                      Open premium
+                    </button>
+                  </div>
+                </div>
+              </div>
               <div className="workshop-toolbar">
                 <label className="workshop-field">
                   <span>Board Name</span>
@@ -449,10 +495,10 @@ export function SideboardWorkshop({ accessToken, username, onBack }: SideboardWo
                 </label>
 
                 <div className="workshop-actions">
-                  <button className="btn btn--secondary" onClick={() => void handleRename()} disabled={saving || !renameDirty}>Rename</button>
+                  <button className="btn btn--secondary" onClick={() => void handleRename()} disabled={saving || !renameDirty || hasValidationErrors}>Rename</button>
                   <button className="btn btn--secondary" onClick={() => void handleActivate()} disabled={saving || !selectedSideboard || selectedSideboard.isActive}>Set Active</button>
-                  <button className="btn btn--secondary" onClick={() => void handleSave(false)} disabled={saving || !contentDirty}>Save</button>
-                  <button className="btn btn--primary" onClick={() => void handleSave(true)} disabled={saving || !contentDirty}>Save and Activate</button>
+                  <button className="btn btn--secondary" onClick={() => void handleSave(false)} disabled={saving || !contentDirty || hasValidationErrors}>Save</button>
+                  <button className="btn btn--primary" onClick={() => void handleSave(true)} disabled={saving || !contentDirty || hasValidationErrors}>Save and Activate</button>
                   <button className="btn btn--danger" onClick={() => void handleDelete()} disabled={saving || !selectedSideboard}>Delete</button>
                 </div>
               </div>
@@ -461,6 +507,9 @@ export function SideboardWorkshop({ accessToken, username, onBack }: SideboardWo
                 <div>
                   <strong>Validation</strong>
                   <p>{validation.summary}</p>
+                  {validation.errors.length > 0 && (
+                    <p>{validation.errors.join(" ")}</p>
+                  )}
                 </div>
                 <div className="workshop-validation__chips">
                   <span>{validation.fixed} fixed</span>
@@ -469,6 +518,12 @@ export function SideboardWorkshop({ accessToken, username, onBack }: SideboardWo
                   <span>{validation.unique} unique</span>
                 </div>
               </div>
+
+              {noUnlockedCards && (
+                <div className="workshop-alert workshop-alert--error" role="alert">
+                  No side cards are unlocked on this account yet, so you cannot build a multiplayer sideboard.
+                </div>
+              )}
 
               <div className="workshop-slots">
                 {draftTokens.map((token, index) => (
@@ -511,12 +566,26 @@ export function SideboardWorkshop({ accessToken, username, onBack }: SideboardWo
                         className="workshop-select"
                         value={token}
                         onChange={(event) => updateDraftToken(index, event.target.value)}
+                        disabled={noUnlockedCards}
                       >
-                        {SUPPORTED_TOKENS.map((supportedToken) => (
-                          <option key={supportedToken} value={supportedToken}>
-                            {supportedToken} · {TOKEN_DESCRIPTIONS[supportedToken]}
-                          </option>
-                        ))}
+                        {noUnlockedCards ? <option value={EMPTY_SLOT_TOKEN}>No unlocked cards</option> : null}
+                        {!noUnlockedCards && (
+                          <option value={EMPTY_SLOT_TOKEN}>Empty slot</option>
+                        )}
+                        {!noUnlockedCards && SUPPORTED_TOKENS.map((supportedToken) => {
+                          const owned = ownedTokenCounts.get(supportedToken) ?? 0;
+                          const isCurrentSelection = supportedToken === token;
+                          const locked = owned <= 0 && !isCurrentSelection;
+                          const ref = getCardReference(supportedToken);
+                          const rarity = ref?.rarity === "wacky_only" ? "Wacky" : ref?.rarity === "rare" ? "Gold" : ref?.rarity ?? "";
+                          return (
+                            <option key={supportedToken} value={supportedToken} disabled={locked}>
+                              {supportedToken} · {TOKEN_DESCRIPTIONS[supportedToken] ?? supportedToken}
+                              {rarity ? ` [${rarity}]` : ""}
+                              {locked ? " (locked)" : ` (${owned} owned)`}
+                            </option>
+                          );
+                        })}
                       </select>
                     </label>
                     <p className="workshop-slot__help">Drag this card onto another slot to reorder the board.</p>
@@ -535,8 +604,15 @@ function normalizeBoardName(name: string): string {
   return name.trim().replace(/\s+/gu, " ");
 }
 
-function buildValidationSummary(tokens: string[]) {
+function buildValidationSummary(tokens: string[], ownedTokens: readonly string[]) {
+  const tokenCounts = new Map<string, number>();
   const counts = tokens.reduce((state, token) => {
+    if (token === EMPTY_SLOT_TOKEN) {
+      return state;
+    }
+
+    tokenCounts.set(token, (tokenCounts.get(token) ?? 0) + 1);
+
     if (/^[+-][1-6]$/u.test(token)) {
       state.fixed += 1;
     } else if (/^[*][1-6]$/u.test(token)) {
@@ -548,9 +624,53 @@ function buildValidationSummary(tokens: string[]) {
     return state;
   }, { fixed: 0, flip: 0, special: 0 });
 
+  const errors = [...tokenCounts.entries()]
+    .filter(([token, count]) => count > getTokenLimit(token))
+    .map(([token, count]) => `${token} appears ${count} times; use at most ${getTokenLimit(token)} in multiplayer custom boards.`);
+
+  const ownedCounts = countTokens(ownedTokens);
+
+  for (const [token, count] of tokenCounts.entries()) {
+    const ownedCount = ownedCounts.get(token) ?? 0;
+    if (ownedCount < count) {
+      errors.push(`${token} requires ${count}, but only ${ownedCount} unlocked.`);
+    }
+  }
+
+  if (tokens.some((token) => token === EMPTY_SLOT_TOKEN)) {
+    errors.push("Fill all 10 slots with unlocked cards before saving.");
+  }
+
   return {
     ...counts,
+    errors,
     unique: new Set(tokens).size,
-    summary: `All ${tokens.length} slots are valid for the bot's custom-sideboard rules.`,
+    summary: errors.length === 0
+      ? `All ${tokens.length} slots are valid: regular cards allow up to ${STANDARD_TOKEN_LIMIT} copies, gold specials allow ${SPECIAL_TOKEN_LIMIT}.`
+      : "This board needs balance edits before it can be saved.",
   };
+}
+
+function getTokenLimit(token: string): number {
+  const ref = getCardReference(token);
+  if (ref?.sideboardLimit === 1) {
+    return SPECIAL_TOKEN_LIMIT;
+  }
+
+  return STANDARD_TOKEN_LIMIT;
+}
+
+function countTokens(tokens: readonly string[] | undefined): Map<string, number> {
+  const counts = new Map<string, number>();
+
+  for (const token of tokens ?? []) {
+    counts.set(token, (counts.get(token) ?? 0) + 1);
+  }
+
+  return counts;
+}
+
+function buildDefaultDraftTokens(ownedTokens: readonly string[] | undefined): string[] {
+  const tokens = [...(ownedTokens ?? [])];
+  return Array.from({ length: 10 }, (_, index) => tokens[index] ?? EMPTY_SLOT_TOKEN);
 }

@@ -1,5 +1,6 @@
 {
   "extends": "../../tsconfig.base.json",
+  "references": [{ "path": "../pazaak-rating" }],
   "compilerOptions": {
     "composite": true,
     "rootDir": "src",

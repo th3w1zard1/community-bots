@@ -1,0 +1,23 @@
+{
+  "name": "@openkotor/trask",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -b",
+    "test": "pnpm run build && node --test dist/*.test.js"
+  },
+  "dependencies": {
+    "@openkotor/config": "workspace:*",
+    "@openkotor/retrieval": "workspace:*",
+    "openai": "^6.34.0"
+  },
+  "devDependencies": {
+    "@openkotor/persistence": "workspace:*"
+  }
+}

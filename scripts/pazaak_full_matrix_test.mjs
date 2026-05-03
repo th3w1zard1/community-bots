@@ -13,6 +13,15 @@ const artifacts = { runId: RUN_ID, api: API, matches: [], accounts: [], websocke
 let accountCounter = 0;
 
 const log = (...args) => console.log("[matrix]", ...args);
+
+/** Python-style `%` with non-negative remainder (matches @openkotor/pazaak-engine). */
+function modPythonStyle(a, modulus) {
+  if (modulus <= 0) {
+    throw new Error("modulus must be positive");
+  }
+
+  return ((a % modulus) + modulus) % modulus;
+}
 const pass = (name, details = {}) => {
   results.push({ name, ok: true, details });
   log("PASS", name, JSON.stringify(details));
@@ -140,26 +149,59 @@ function sideCardOptions(player) {
   const options = [];
   for (const card of player.hand ?? []) {
     if (used.has(card.id)) continue;
-    if (card.type === "plus") options.push({ cardId: card.id, appliedValue: card.value, label: card.label });
-    if (card.type === "minus") options.push({ cardId: card.id, appliedValue: -card.value, label: card.label });
+    if (card.type === "plus") options.push({ cardId: card.id, appliedValue: card.value, label: card.label, cardType: card.type });
+    if (card.type === "minus") options.push({ cardId: card.id, appliedValue: -card.value, label: card.label, cardType: card.type });
     if (card.type === "flip") {
-      options.push({ cardId: card.id, appliedValue: card.value, label: `+${card.value}` });
-      options.push({ cardId: card.id, appliedValue: -card.value, label: `-${card.value}` });
+      options.push({ cardId: card.id, appliedValue: card.value, label: `+${card.value}`, cardType: card.type });
+      options.push({ cardId: card.id, appliedValue: -card.value, label: `-${card.value}`, cardType: card.type });
     }
     if (card.type === "value_change") {
-      options.push({ cardId: card.id, appliedValue: 1, label: "+1" });
-      options.push({ cardId: card.id, appliedValue: 2, label: "+2" });
-      options.push({ cardId: card.id, appliedValue: -1, label: "-1" });
-      options.push({ cardId: card.id, appliedValue: -2, label: "-2" });
+      options.push({ cardId: card.id, appliedValue: 1, label: "+1", cardType: card.type });
+      options.push({ cardId: card.id, appliedValue: 2, label: "+2", cardType: card.type });
+      options.push({ cardId: card.id, appliedValue: -1, label: "-1", cardType: card.type });
+      options.push({ cardId: card.id, appliedValue: -2, label: "-2", cardType: card.type });
     }
-    if (card.type === "copy_previous" && previousBoardValue !== undefined) options.push({ cardId: card.id, appliedValue: previousBoardValue, label: "D" });
+    if (card.type === "copy_previous" && previousBoardValue !== undefined) {
+      options.push({ cardId: card.id, appliedValue: previousBoardValue, label: "D", cardType: card.type });
+    }
     if (card.type === "tiebreaker") {
-      options.push({ cardId: card.id, appliedValue: 1, label: "+1T" });
-      options.push({ cardId: card.id, appliedValue: -1, label: "-1T" });
+      options.push({ cardId: card.id, appliedValue: 1, label: "+1T", cardType: card.type });
+      options.push({ cardId: card.id, appliedValue: -1, label: "-1T", cardType: card.type });
     }
-    if (card.type === "flip_two_four" || card.type === "flip_three_six") options.push({ cardId: card.id, appliedValue: 0, label: card.label });
+    if (card.type === "flip_two_four" || card.type === "flip_three_six") {
+      options.push({ cardId: card.id, appliedValue: 0, label: card.label, cardType: card.type });
+    }
+    if (card.type === "mod_previous" && previousBoardValue !== undefined && card.value > 0) {
+      const remainder = modPythonStyle(previousBoardValue, card.value);
+      options.push({ cardId: card.id, appliedValue: remainder, label: card.label, cardType: card.type });
+    }
+    if (card.type === "halve_previous" && previousBoardValue !== undefined) {
+      const halved = Math.trunc(previousBoardValue / 2);
+      options.push({ cardId: card.id, appliedValue: halved, label: card.label, cardType: card.type });
+    }
+    if (card.type === "hard_reset") {
+      options.push({ cardId: card.id, appliedValue: 0, label: "00", cardType: card.type });
+    }
   }
   return options;
+}
+
+function projectedTotalAfterSide(player, option) {
+  const card = player.hand?.find((entry) => entry.id === option.cardId);
+  if (!card) {
+    return player.total + option.appliedValue;
+  }
+
+  const prev = player.board?.at(-1)?.value;
+  if ((card.type === "mod_previous" || card.type === "halve_previous") && prev !== undefined) {
+    return player.total + (option.appliedValue - prev);
+  }
+
+  if (card.type === "hard_reset") {
+    return player.total;
+  }
+
+  return player.total + option.appliedValue;
 }
 
 async function actOnce(actor, match) {
@@ -177,9 +219,9 @@ async function actOnce(actor, match) {
     const refreshedIdx = playerIndex(match, actor.userId);
     const refreshedPlayer = match.players[refreshedIdx];
     const playable = sideCardOptions(refreshedPlayer)
-      .filter((option) => refreshedPlayer.total + option.appliedValue <= 20)
-      .sort((left, right) => Math.abs(20 - (refreshedPlayer.total + left.appliedValue)) - Math.abs(20 - (refreshedPlayer.total + right.appliedValue)))[0];
-    if (playable && (refreshedPlayer.total + playable.appliedValue >= 18 || refreshedPlayer.total > 20)) {
+      .filter((option) => projectedTotalAfterSide(refreshedPlayer, option) <= 20)
+      .sort((left, right) => Math.abs(20 - projectedTotalAfterSide(refreshedPlayer, left)) - Math.abs(20 - projectedTotalAfterSide(refreshedPlayer, right)))[0];
+    if (playable && (projectedTotalAfterSide(refreshedPlayer, playable) >= 18 || refreshedPlayer.total > 20)) {
       return (await expectOk(`${actor.surface} play side ${playable.label}`, api(`/api/match/${match.id}/play`, {
         method: "POST",
         token: actor.token,
@@ -271,6 +313,28 @@ async function pairViaLobbyId(host, guest) {
   return (await expectOk("start lobby by id", api(`/api/lobbies/${encodeURIComponent(lobbyId)}/start`, { method: "POST", token: host.token }))).match;
 }
 
+async function pairViaWackyLobby(host, guest) {
+  const created = await expectOk("create wacky lobby by id", api("/api/lobbies", {
+    method: "POST",
+    token: host.token,
+    body: {
+      name: `Wacky ${host.surface} host`,
+      maxPlayers: 2,
+      variant: "canonical",
+      ranked: false,
+      gameMode: "wacky",
+      turnTimerSeconds: 120,
+    },
+  }));
+  const lobbyId = created.lobby.id;
+  await expectOk("join wacky lobby by id", api(`/api/lobbies/${encodeURIComponent(lobbyId)}/join`, { method: "POST", token: guest.token, body: {} }));
+  await expectOk("host ready wacky", api(`/api/lobbies/${encodeURIComponent(lobbyId)}/ready`, { method: "POST", token: host.token, body: { ready: true } }));
+  await expectOk("guest ready wacky", api(`/api/lobbies/${encodeURIComponent(lobbyId)}/ready`, { method: "POST", token: guest.token, body: { ready: true } }));
+  const match = (await expectOk("start wacky lobby by id", api(`/api/lobbies/${encodeURIComponent(lobbyId)}/start`, { method: "POST", token: host.token }))).match;
+  assert(match.gameMode === "wacky", "wacky lobby must create a wacky match");
+  return match;
+}
+
 async function pairViaLobbyCode(host, guest) {
   const password = "codepass";
   const created = await expectOk("create lobby by code", api("/api/lobbies", {
@@ -317,14 +381,14 @@ async function smokeEndpoints() {
     method: "PUT",
     token: restored.token,
     body: {
-      theme: "modern",
+      tableTheme: "tatooine",
       soundEnabled: false,
       reducedMotionEnabled: true,
       turnTimerSeconds: 45,
       preferredAiDifficulty: "hard",
     },
   }));
-  assert(settings.settings.theme === "modern", "settings theme did not persist");
+  assert(settings.settings.tableTheme === "tatooine", "settings tableTheme did not persist");
   assert(settings.settings.reducedMotionEnabled === true, "settings reduced motion did not persist");
   assert(settings.settings.preferredAiDifficulty === "hard", "settings AI difficulty did not persist");
 
@@ -408,8 +472,36 @@ async function lobbyAiAndStatus() {
   const updatedAi = await expectOk("update AI difficulty", api(`/api/lobbies/${encodeURIComponent(lobbyId)}/ai/${encodeURIComponent(ai.userId)}/difficulty`, { method: "POST", token: host.token, body: { difficulty: "professional" } }));
   assert(updatedAi.lobby.players.some((player) => player.userId === ai.userId && player.aiDifficulty === "professional"), "AI difficulty did not update");
   await expectOk("set lobby status", api(`/api/lobbies/${encodeURIComponent(lobbyId)}/status`, { method: "POST", token: host.token, body: { status: "matchmaking" } }));
-  await expectOk("leave AI lobby", api(`/api/lobbies/${encodeURIComponent(lobbyId)}/leave`, { method: "POST", token: host.token }));
-  return { lobbyId, aiUserId: ai.userId };
+  await expectOk("host ready AI lobby", api(`/api/lobbies/${encodeURIComponent(lobbyId)}/ready`, { method: "POST", token: host.token, body: { ready: true } }));
+  let match = (await expectOk("start AI lobby", api(`/api/lobbies/${encodeURIComponent(lobbyId)}/start`, { method: "POST", token: host.token }))).match;
+
+  for (let action = 0; action < 12 && match.phase !== "completed" && match.players[match.activePlayerIndex].userId === host.userId; action += 1) {
+    match = await actOnce(host, match);
+  }
+
+  assert(match.phase === "completed" || match.players[match.activePlayerIndex].userId === ai.userId, "AI did not become active in the lobby match");
+  const aiBefore = match.players.find((player) => player.userId === ai.userId);
+  const aiBoardBefore = aiBefore?.board?.length ?? 0;
+  const aiSideBefore = aiBefore?.sideCardsPlayed?.length ?? 0;
+
+  let observedAiAction = match.phase === "completed";
+  for (let attempt = 0; attempt < 25 && !observedAiAction; attempt += 1) {
+    await sleep(1000);
+    const response = await expectOk("poll AI match", api(`/api/match/${encodeURIComponent(match.id)}`, { token: host.token }));
+    match = response.match;
+    const aiAfter = match.players.find((player) => player.userId === ai.userId);
+    observedAiAction = match.phase === "completed"
+      || (aiAfter?.board?.length ?? 0) > aiBoardBefore
+      || (aiAfter?.sideCardsPlayed?.length ?? 0) > aiSideBefore
+      || match.players[match.activePlayerIndex].userId !== ai.userId;
+  }
+
+  assert(observedAiAction, "AI seat did not auto-execute a move after becoming active");
+  if (match.phase !== "completed") {
+    await expectOk("cleanup AI match", api(`/api/match/${encodeURIComponent(match.id)}/forfeit`, { method: "POST", token: host.token }));
+  }
+
+  return { lobbyId, aiUserId: ai.userId, matchId: match.id, observedAiAction };
 }
 
 async function main() {
@@ -434,6 +526,9 @@ async function main() {
   for (const [name, left, right, pairer] of fullCases) {
     await runCase(name, () => fullMatchCombination(name, left, right, pairer));
   }
+
+  await runCase("lobby id wacky mode discord-bot host to webui guest", () =>
+    fullMatchCombination("lobby id wacky mode discord-bot host to webui guest", "discord", "webui", pairViaWackyLobby));
 
   const passed = results.filter((result) => result.ok).length;
   const failed = results.length - passed;

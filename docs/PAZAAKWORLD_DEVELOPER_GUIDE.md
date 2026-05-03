@@ -5,7 +5,7 @@
 ### 1. Sound Effects
 
 ```typescript
-import { soundManager } from "@/utils/soundManager.ts";
+import { soundManager } from "./utils/soundManager.ts";
 
 // Play sound effects
 soundManager.beep("success", 150);  // High pitched beep
@@ -29,7 +29,7 @@ soundManager.stopBackgroundMusic();
 ### 2. Animated Text
 
 ```typescript
-import { AnimatedText } from "@/components/AnimatedText.tsx";
+import { AnimatedText } from "./components/AnimatedText.tsx";
 
 // Jailbars effect (vertical lines moving across text)
 <AnimatedText text="PAZAAK MATCH" animationType="jailbars" />
@@ -47,8 +47,8 @@ import { AnimatedText } from "@/components/AnimatedText.tsx";
 ### 3. Settings Modal
 
 ```typescript
-import { SettingsModal } from "@/components/SettingsModal.tsx";
-import type { PazaakUserSettings } from "@/types.ts";
+import { SettingsModal } from "./components/SettingsModal.tsx";
+import type { PazaakUserSettings } from "./types.ts";
 
 const [isOpen, setIsOpen] = useState(false);
 const [settings, setSettings] = useState<PazaakUserSettings>({
@@ -73,7 +73,7 @@ const [settings, setSettings] = useState<PazaakUserSettings>({
 ### 4. Connection Status
 
 ```typescript
-import { ConnectionStatus } from "@/components/ConnectionStatus.tsx";
+import { ConnectionStatus } from "./components/ConnectionStatus.tsx";
 
 <ConnectionStatus 
   isOnline={true}
@@ -84,7 +84,7 @@ import { ConnectionStatus } from "@/components/ConnectionStatus.tsx";
 ### 5. Game Assets
 
 ```typescript
-import { PazaakAsset, CardAsset, CharacterPortrait, generateAiImageUrl } from "@/components/PazaakAsset.tsx";
+import { PazaakAsset, CardAsset, CharacterPortrait, generateAiImageUrl } from "./components/PazaakAsset.tsx";
 
 // Generic asset with fallback
 <PazaakAsset
@@ -109,7 +109,7 @@ import { PazaakAsset, CardAsset, CharacterPortrait, generateAiImageUrl } from "@
 ### 6. Global Account Corner
 
 ```typescript
-import { GlobalAccountCorner } from "@/components/GlobalAccountCorner.tsx";
+import { GlobalAccountCorner } from "./components/GlobalAccountCorner.tsx";
 
 <GlobalAccountCorner
   username="Player Name"

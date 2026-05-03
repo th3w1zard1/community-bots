@@ -2,6 +2,7 @@ import type {
   AdvisorDifficulty,
   LeaderboardEntry,
   MatchmakingQueueRecord,
+  PazaakGameMode,
   PazaakOpponentProfileRecord,
   PazaakLobbyRecord,
   PazaakMatchHistoryRecord,
@@ -10,8 +11,32 @@ import type {
   SavedSideboardCollectionRecord,
   SerializedMatch,
   SideCardOption,
+  SwissStandingsRowRecord,
+  TournamentBracketViewRecord,
+  TournamentFormat,
+  TournamentStateRecord,
   WalletRecord,
 } from "./types.ts";
+import {
+  createBrowserApiClient,
+  parseConfiguredBases,
+  resolveBrowserApiBases,
+  subscribeToReconnectingWebSocket,
+  type RealtimeConnectionState,
+} from "@openkotor/platform/browser";
+import { SOCIAL_AUTH_PROVIDERS, type CardWorldConfig, type SocialAuthProvider } from "@openkotor/platform";
+import { DefaultSocket } from "@heroiclabs/nakama-js";
+import {
+  bootstrapNakamaActivitySession,
+  getNakamaClient,
+  isNakamaBackend,
+  nakamaRpc,
+  sessionFromPazaakAccessToken,
+  tryDecodeNakamaCredential,
+} from "./nakamaClient.ts";
+
+export type { SocialAuthProvider };
+export { isNakamaBackend, bootstrapNakamaActivitySession };
 
 export interface PazaakAccountRecord {
   accountId: string;
@@ -50,8 +75,6 @@ export interface AuthSessionResponse {
   linkedIdentities: PazaakLinkedIdentityRecord[];
 }
 
-export type SocialAuthProvider = "google" | "discord" | "github";
-
 export interface SocialAuthProviderConfig {
   provider: SocialAuthProvider;
   enabled: boolean;
@@ -66,36 +89,19 @@ export interface SocialAuthStartResponse {
   redirectUrl: string;
 }
 
-// ---------------------------------------------------------------------------
-// HTTP helpers
-// ---------------------------------------------------------------------------
+const legacyOrigin = String(import.meta.env.VITE_LEGACY_HTTP_ORIGIN ?? "").trim();
+const apiClient = createBrowserApiClient({
+  apiBases: legacyOrigin
+    ? parseConfiguredBases(legacyOrigin)
+    : resolveBrowserApiBases({
+        configuredBases: parseConfiguredBases(import.meta.env.VITE_API_BASES),
+        localApiPort: 4001,
+      }),
+});
 
-async function apiFetch<T>(
-  path: string,
-  accessToken: string,
-  init?: RequestInit,
-): Promise<T> {
-  const res = await fetch(path, {
-    ...init,
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${accessToken}`,
-      ...(init?.headers ?? {}),
-    },
-  });
-
-  const body = await res.json() as Record<string, unknown>;
-
-  if (!res.ok) {
-    throw new Error((body["error"] as string | undefined) ?? `HTTP ${res.status}`);
-  }
-
-  return body as T;
-}
-
-// ---------------------------------------------------------------------------
-// Public API client
-// ---------------------------------------------------------------------------
+const apiFetch = apiClient.requestJsonWithBearer;
+const apiPublicFetch = apiClient.requestJson;
+const apiPublicOptionalFetch = apiClient.requestOptionalJson;
 
 export interface MatchResponse {
   match: SerializedMatch;
@@ -130,8 +136,21 @@ export interface OpponentsResponse {
   serverTime: string;
 }
 
+const DEFAULT_CARDWORLD_CONFIG: CardWorldConfig = {
+  botGameType: "pazaak",
+  defaultPublicGameType: "blackjack",
+  pazaakRequiresOwnershipProof: true,
+  acceptedOwnershipProofFilenames: ["chitin.key"],
+};
+
 export interface QueueResponse {
   queue: MatchmakingQueueRecord | null;
+}
+
+/** Matchmaking enqueue may return an immediate match when another player was already queued. */
+export interface EnqueueMatchmakingResult {
+  queue: MatchmakingQueueRecord | null;
+  match: SerializedMatch | null;
 }
 
 export interface MatchmakingStatsResponse {
@@ -152,8 +171,210 @@ export interface LobbyResponse {
   match?: SerializedMatch;
 }
 
+export interface TraskSourceRecord {
+  id: string;
+  name: string;
+  kind: "website" | "github" | "discord";
+  homeUrl: string;
+  description: string;
+  freshnessPolicy: string;
+}
+
+export interface TraskQueryRecord {
+  queryId: string;
+  userId: string;
+  query: string;
+  status: "pending" | "complete" | "failed";
+  answer: string | null;
+  sources: Array<{
+    id: string;
+    name: string;
+    url: string;
+  }>;
+  error: string | null;
+  createdAt: string;
+  completedAt: string | null;
+}
+
+function nakamaUseSsl(): boolean {
+  const raw = String(import.meta.env.VITE_NAKAMA_USE_SSL ?? "").toLowerCase().trim();
+  return raw === "1" || raw === "true" || raw === "yes";
+}
+
+/** Nakama ranked queue uses the built-in matchmaker; ticket is tied to this socket until matched or cancelled. */
+let nakamaMatchmakingSession: {
+  accessToken: string;
+  socket: DefaultSocket;
+  ticket: string;
+  queue: MatchmakingQueueRecord;
+} | null = null;
+
+async function nakamaDisconnectMatchmaking(accessToken: string): Promise<boolean> {
+  const cur = nakamaMatchmakingSession;
+  if (!cur || cur.accessToken !== accessToken) return false;
+  try {
+    await cur.socket.removeMatchmaker(cur.ticket);
+  } catch {
+    /* ticket may already be consumed */
+  }
+  cur.socket.disconnect(false);
+  nakamaMatchmakingSession = null;
+  return true;
+}
+
+const NAKAMA_OP_SNAPSHOT = 1;
+const NAKAMA_OP_COMMAND = 2;
+const NAKAMA_OP_CHAT = 3;
+const NAKAMA_OP_ERROR = 4;
+
+function normalizeNakamaLobby(raw: Record<string, unknown>): PazaakLobbyRecord {
+  const players = Array.isArray(raw.players) ? raw.players : [];
+  return {
+    id: String(raw.id ?? ""),
+    lobbyCode: String(raw.lobbyCode ?? ""),
+    name: String(raw.name ?? ""),
+    hostUserId: String(raw.hostUserId ?? ""),
+    maxPlayers: Number(raw.maxPlayers ?? 2),
+    tableSettings: raw.tableSettings as PazaakLobbyRecord["tableSettings"],
+    passwordHash: raw.passwordHash != null ? String(raw.passwordHash) : null,
+    status: raw.status as PazaakLobbyRecord["status"],
+    matchId: raw.matchId != null ? String(raw.matchId) : null,
+    players: players.map((p) => {
+      const o = p as Record<string, unknown>;
+      return {
+        userId: String(o.userId ?? ""),
+        displayName: String(o.displayName ?? ""),
+        ready: Boolean(o.ready),
+        isHost: Boolean(o.isHost),
+        isAi: Boolean(o.isAi),
+        ...(typeof o.aiDifficulty === "string" ? { aiDifficulty: o.aiDifficulty as AdvisorDifficulty } : {}),
+        joinedAt: String(o.joinedAt ?? ""),
+      };
+    }),
+    createdAt: String(raw.createdAt ?? ""),
+    updatedAt: String(raw.updatedAt ?? ""),
+  };
+}
+
+async function nakamaMatchSnapshot(accessToken: string, logicalMatchId: string): Promise<SerializedMatch> {
+  const data = await nakamaRpc<{ match: SerializedMatch | null }>(accessToken, "pazaak.match_get", { matchId: logicalMatchId });
+  if (!data.match) throw new Error("Match not found.");
+  return data.match;
+}
+
+async function nakamaSendMatchCommand(accessToken: string, nakamaMatchId: string, body: Record<string, unknown>): Promise<void> {
+  const session = await sessionFromPazaakAccessToken(accessToken);
+  const socket = getNakamaClient().createSocket(nakamaUseSsl()) as DefaultSocket;
+  const clientMoveId =
+    typeof globalThis.crypto?.randomUUID === "function"
+      ? globalThis.crypto.randomUUID()
+      : `mv-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  await socket.connect(session, false);
+  try {
+    await socket.joinMatch(nakamaMatchId);
+    await socket.sendMatchState(
+      nakamaMatchId,
+      NAKAMA_OP_COMMAND,
+      JSON.stringify({ ...body, clientMoveId }),
+    );
+  } finally {
+    socket.disconnect(false);
+  }
+}
+
+async function nakamaMove(accessToken: string, logicalMatchId: string, cmd: Record<string, unknown>): Promise<SerializedMatch> {
+  const snap = await nakamaMatchSnapshot(accessToken, logicalMatchId);
+  const nid = snap.nakamaMatchId;
+  if (!nid) throw new Error("Active match is missing a realtime id; try re-entering the match.");
+  await nakamaSendMatchCommand(accessToken, nid, cmd);
+  return nakamaMatchSnapshot(accessToken, logicalMatchId);
+}
+
+function decodeChatMessagePayload(data: Uint8Array): ChatMessage | null {
+  try {
+    const text = new TextDecoder().decode(data);
+    const msg = JSON.parse(text) as ChatMessage;
+    return msg && typeof msg.id === "string" && typeof msg.text === "string" ? msg : null;
+  } catch {
+    return null;
+  }
+}
+
+function decodeSnapshotPayload(data: Uint8Array): SerializedMatch | null {
+  try {
+    const text = new TextDecoder().decode(data);
+    const outer = JSON.parse(text) as { type?: string; data?: SerializedMatch };
+    if (outer?.type === "match_update" && outer.data) return outer.data;
+  } catch {
+    return null;
+  }
+  return null;
+}
+
 export async function fetchMe(accessToken: string): Promise<MeResponse> {
+  if (isNakamaBackend()) {
+    return nakamaRpc<MeResponse>(accessToken, "pazaak.me", {});
+  }
   return apiFetch<MeResponse>("/api/me", accessToken);
+}
+
+/** Public ops subset (time presets, regions, flags) — no auth. */
+export interface PublicPazaakConfig {
+  version: 1;
+  timers: { turnTimerSeconds: number };
+  matchmaking: {
+    regions: Array<{ id: string; label: string; locationHint?: string }>;
+    defaultRegionId: string;
+  };
+  timeControls: {
+    presets: Array<{ id: string; label: string; turnSeconds: number; incrementSeconds?: number }>;
+  };
+  features: { blackjackOnlineEnabled: boolean; allowPrivateBackendUrl: boolean };
+}
+
+export async function fetchPublicPazaakConfig(): Promise<PublicPazaakConfig | null> {
+  if (isNakamaBackend()) {
+    try {
+      const httpKey = String(import.meta.env.VITE_NAKAMA_SERVER_KEY ?? "defaultkey").trim() || "defaultkey";
+      const res = await getNakamaClient().rpcHttpKey(httpKey, "pazaak.config_public", {});
+      return (res.payload ?? null) as PublicPazaakConfig | null;
+    } catch {
+      return null;
+    }
+  }
+  return apiPublicOptionalFetch<PublicPazaakConfig>("/api/config/public");
+}
+
+export async function fetchAdminPolicy(accessToken: string): Promise<{ policy: unknown; etag: string | null }> {
+  return apiFetch<{ policy: unknown; etag: string | null }>("/api/admin/policy", accessToken);
+}
+
+export async function putAdminPolicy(accessToken: string, patch: unknown): Promise<{ ok: true; etag: string }> {
+  return apiFetch<{ ok: true; etag: string }>("/api/admin/policy", accessToken, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(patch),
+  });
+}
+
+export async function fetchBlackjackRules(accessToken: string): Promise<{ blackjack: unknown }> {
+  return apiFetch<{ blackjack: unknown }>("/api/blackjack/rules", accessToken);
+}
+
+export interface CrateOpenResponse {
+  wallet: WalletRecord;
+  opened: { tokens: string[]; bonusCredits: number };
+  kind: "standard" | "premium";
+}
+
+export async function openRewardCrate(accessToken: string, kind: "standard" | "premium"): Promise<CrateOpenResponse> {
+  if (isNakamaBackend()) {
+    throw new Error("Reward crates are not wired to Nakama in this build yet.");
+  }
+  return apiFetch<CrateOpenResponse>("/api/crates/open", accessToken, {
+    method: "POST",
+    body: JSON.stringify({ kind }),
+  });
 }
 
 export async function registerAccount(input: {
@@ -162,56 +383,84 @@ export async function registerAccount(input: {
   email?: string;
   password: string;
 }): Promise<AuthSessionResponse> {
-  const res = await fetch("/api/auth/register", {
+  return apiPublicFetch<AuthSessionResponse>("/api/auth/register", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(input),
   });
-  const body = await res.json() as AuthSessionResponse | { error?: string };
-  if (!res.ok) throw new Error((body as { error?: string }).error ?? `HTTP ${res.status}`);
-  return body as AuthSessionResponse;
 }
 
 export async function loginAccount(identifier: string, password: string): Promise<AuthSessionResponse> {
-  const res = await fetch("/api/auth/login", {
+  return apiPublicFetch<AuthSessionResponse>("/api/auth/login", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ identifier, password }),
   });
-  const body = await res.json() as AuthSessionResponse | { error?: string };
-  if (!res.ok) throw new Error((body as { error?: string }).error ?? `HTTP ${res.status}`);
-  return body as AuthSessionResponse;
 }
 
 export async function fetchSocialAuthProviders(): Promise<SocialAuthProviderListResponse> {
-  const res = await fetch("/api/auth/oauth/providers");
-  const body = await res.json() as SocialAuthProviderListResponse | { error?: string };
-  if (!res.ok) throw new Error((body as { error?: string }).error ?? `HTTP ${res.status}`);
-  return body as SocialAuthProviderListResponse;
+  const body = await apiPublicOptionalFetch<SocialAuthProviderListResponse>("/api/auth/oauth/providers");
+  return body ?? {
+    providers: SOCIAL_AUTH_PROVIDERS.map((provider: SocialAuthProvider) => ({ provider, enabled: false })),
+  };
 }
 
-export async function startSocialAuth(provider: SocialAuthProvider): Promise<SocialAuthStartResponse> {
-  const res = await fetch(`/api/auth/oauth/${encodeURIComponent(provider)}/start`, {
+export async function startSocialAuth(provider: SocialAuthProvider, matchId?: string): Promise<SocialAuthStartResponse> {
+  return apiPublicFetch<SocialAuthStartResponse>(`/api/auth/oauth/${encodeURIComponent(provider)}/start`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
+    body: matchId ? JSON.stringify({ matchId }) : undefined,
   });
-  const body = await res.json() as SocialAuthStartResponse | { error?: string };
-  if (!res.ok) throw new Error((body as { error?: string }).error ?? `HTTP ${res.status}`);
-  return body as SocialAuthStartResponse;
 }
 
 export async function fetchAuthSession(accessToken: string): Promise<{
   account: PazaakAccountRecord;
   linkedIdentities: PazaakLinkedIdentityRecord[];
 }> {
+  if (isNakamaBackend()) {
+    const decoded = tryDecodeNakamaCredential(accessToken);
+    if (!decoded?.user_id) {
+      throw new Error("Invalid Nakama session.");
+    }
+    const account = await getNakamaClient().getAccount(decoded);
+    const u = account.user;
+    const userId = u?.id ?? decoded.user_id;
+    const displayName = u?.display_name ?? u?.username ?? "Player";
+    const username = u?.username ?? userId;
+    return {
+      account: {
+        accountId: userId,
+        username,
+        displayName,
+        email: null,
+        legacyGameUserId: userId,
+        createdAt: "",
+        updatedAt: "",
+      },
+      linkedIdentities: [],
+    };
+  }
   return apiFetch("/api/auth/session", accessToken);
 }
 
 export async function logoutAccount(accessToken: string): Promise<void> {
+  if (isNakamaBackend()) {
+    try {
+      const s = await sessionFromPazaakAccessToken(accessToken);
+      await getNakamaClient().sessionLogout(s, s.token, s.refresh_token);
+    } catch {
+      /* ignore */
+    }
+    return;
+  }
   await apiFetch<{ ok: true }>("/api/auth/logout", accessToken, { method: "POST" });
 }
 
 export async function fetchSettings(accessToken: string): Promise<PazaakUserSettings> {
+  if (isNakamaBackend()) {
+    const data = await nakamaRpc<SettingsResponse>(accessToken, "pazaak.settings_get", {});
+    return data.settings;
+  }
   const data = await apiFetch<SettingsResponse>("/api/settings", accessToken);
   return data.settings;
 }
@@ -220,6 +469,10 @@ export async function updateSettings(
   accessToken: string,
   settings: Partial<PazaakUserSettings>,
 ): Promise<PazaakUserSettings> {
+  if (isNakamaBackend()) {
+    const data = await nakamaRpc<SettingsResponse>(accessToken, "pazaak.settings_update", settings as object);
+    return data.settings;
+  }
   const data = await apiFetch<SettingsResponse>("/api/settings", accessToken, {
     method: "PUT",
     body: JSON.stringify(settings),
@@ -228,45 +481,155 @@ export async function updateSettings(
 }
 
 export async function fetchLeaderboard(accessToken: string): Promise<LeaderboardEntry[]> {
+  if (isNakamaBackend()) {
+    const data = await nakamaRpc<{ leaders: LeaderboardEntry[] }>(accessToken, "pazaak.leaderboard", {});
+    return (data.leaders ?? []).map((row) => ({
+      rank: row.rank ?? 0,
+      userId: row.userId,
+      displayName: row.displayName,
+      mmr: row.mmr ?? 0,
+      gamesPlayed: row.gamesPlayed ?? 0,
+      gamesWon: row.gamesWon ?? row.wins ?? 0,
+      wins: row.wins ?? 0,
+      losses: row.losses ?? 0,
+      balance: row.balance ?? 0,
+    }));
+  }
   const data = await apiFetch<LeaderboardResponse>("/api/leaderboard", accessToken);
   return data.leaders;
 }
 
 export async function fetchHistory(accessToken: string, limit = 25): Promise<PazaakMatchHistoryRecord[]> {
+  if (isNakamaBackend()) {
+    const data = await nakamaRpc<{
+      history: Array<{ matchId: string; opponentName: string; result: string; mmrDelta: number; playedAt: string }>;
+    }>(accessToken, "pazaak.history", { limit });
+    return (data.history ?? []).map((r) => ({
+      matchId: r.matchId,
+      channelId: "",
+      winnerId: "",
+      winnerName: r.result === "win" ? "You" : r.opponentName,
+      loserId: "",
+      loserName: r.result === "loss" ? "You" : r.opponentName,
+      wager: 0,
+      completedAt: r.playedAt,
+      summary: `${r.result === "win" ? "Win" : "Loss"} vs ${r.opponentName} (${r.mmrDelta >= 0 ? "+" : ""}${r.mmrDelta} MMR)`,
+    }));
+  }
   const data = await apiFetch<HistoryResponse>(`/api/me/history?limit=${encodeURIComponent(String(limit))}`, accessToken);
   return data.history;
 }
 
 export async function fetchPazaakOpponents(): Promise<PazaakOpponentProfileRecord[]> {
-  const res = await fetch("/api/pazaak/opponents");
-  const body = await res.json() as OpponentsResponse | { error?: string };
-  if (!res.ok) throw new Error((body as { error?: string }).error ?? `HTTP ${res.status}`);
-  return (body as OpponentsResponse).opponents;
+  const body = await apiPublicOptionalFetch<OpponentsResponse>("/api/pazaak/opponents");
+  return body?.opponents ?? [];
 }
 
-export async function enqueueMatchmaking(accessToken: string, preferredMaxPlayers = 2): Promise<MatchmakingQueueRecord | null> {
-  const data = await apiFetch<QueueResponse>("/api/matchmaking/enqueue", accessToken, {
+export async function fetchCardWorldConfig(): Promise<CardWorldConfig> {
+  const body = await apiPublicOptionalFetch<CardWorldConfig>("/api/cardworld/config");
+  return body ?? DEFAULT_CARDWORLD_CONFIG;
+}
+
+export async function enqueueMatchmaking(
+  accessToken: string,
+  preferredMaxPlayers = 2,
+  preferredRegions?: string[],
+): Promise<EnqueueMatchmakingResult> {
+  if (isNakamaBackend()) {
+    await nakamaDisconnectMatchmaking(accessToken);
+
+    const me = await nakamaRpc<MeResponse>(accessToken, "pazaak.me", {});
+    const session = await sessionFromPazaakAccessToken(accessToken);
+    const socket = getNakamaClient().createSocket(nakamaUseSsl()) as DefaultSocket;
+
+    /** Nakama counts total players in the formed match (see Heroic matchmaker docs), not “opponents only”. */
+    const partySize = Math.max(2, Math.min(8, Math.floor(preferredMaxPlayers) || 2));
+
+    const stringProps: Record<string, string> = {};
+    if (preferredRegions?.length) stringProps.region = preferredRegions[0]!;
+
+    await socket.connect(session, false);
+    let ticket: string;
+    try {
+      const ticketRes = await socket.addMatchmaker("*", partySize, partySize, stringProps);
+      ticket = ticketRes.ticket;
+    } catch (err) {
+      socket.disconnect(false);
+      throw err;
+    }
+
+    const queue: MatchmakingQueueRecord = {
+      userId: me.user.id,
+      displayName: me.user.displayName,
+      mmr: me.wallet.mmr,
+      preferredMaxPlayers: partySize,
+      enqueuedAt: new Date().toISOString(),
+    };
+
+    nakamaMatchmakingSession = { accessToken, socket, ticket, queue };
+
+    socket.onmatchmakermatched = async (mm) => {
+      const held = nakamaMatchmakingSession;
+      if (!held || held.socket !== socket) return;
+      try {
+        await socket.joinMatch(undefined, mm.token);
+      } catch {
+        /* presence may already be joined via another path */
+      } finally {
+        socket.disconnect(false);
+        if (nakamaMatchmakingSession?.socket === socket) nakamaMatchmakingSession = null;
+      }
+    };
+
+    return { queue, match: null };
+  }
+  const data = await apiFetch<QueueResponse & { match?: SerializedMatch | null }>("/api/matchmaking/enqueue", accessToken, {
     method: "POST",
-    body: JSON.stringify({ preferredMaxPlayers }),
+    body: JSON.stringify({
+      preferredMaxPlayers,
+      ...(preferredRegions?.length ? { preferredRegions } : {}),
+    }),
   });
-  return data.queue;
+  return { queue: data.queue ?? null, match: data.match ?? null };
 }
 
 export async function leaveMatchmaking(accessToken: string): Promise<boolean> {
+  if (isNakamaBackend()) {
+    const removed = await nakamaDisconnectMatchmaking(accessToken);
+    try {
+      await nakamaRpc<{ removed: boolean }>(accessToken, "pazaak.matchmaking_leave", {});
+    } catch {
+      /* ignore */
+    }
+    return removed;
+  }
   const data = await apiFetch<{ removed: boolean }>("/api/matchmaking/leave", accessToken, { method: "POST" });
   return data.removed;
 }
 
 export async function fetchMatchmakingStatus(accessToken: string): Promise<MatchmakingQueueRecord | null> {
+  if (isNakamaBackend()) {
+    const local = nakamaMatchmakingSession?.accessToken === accessToken ? nakamaMatchmakingSession.queue : null;
+    if (local) return local;
+    const data = await nakamaRpc<QueueResponse>(accessToken, "pazaak.matchmaking_status", {});
+    return data.queue ?? null;
+  }
   const data = await apiFetch<QueueResponse>("/api/matchmaking/status", accessToken);
   return data.queue;
 }
 
 export async function fetchMatchmakingStats(accessToken: string): Promise<MatchmakingStatsResponse> {
+  if (isNakamaBackend()) {
+    return nakamaRpc<MatchmakingStatsResponse>(accessToken, "pazaak.matchmaking_stats", {});
+  }
   return apiFetch<MatchmakingStatsResponse>("/api/matchmaking/stats", accessToken);
 }
 
 export async function fetchLobbies(accessToken: string): Promise<PazaakLobbyRecord[]> {
+  if (isNakamaBackend()) {
+    const data = await nakamaRpc<{ lobbies: Record<string, unknown>[] }>(accessToken, "pazaak.lobbies_list", {});
+    return (data.lobbies ?? []).map(normalizeNakamaLobby);
+  }
   const data = await apiFetch<LobbiesResponse>("/api/lobbies", accessToken);
   return data.lobbies;
 }
@@ -283,8 +646,15 @@ export async function createLobby(
     turnTimerSeconds?: number;
     ranked?: boolean;
     allowAiFill?: boolean;
+    sideboardMode?: "runtime_random" | "player_active_custom" | "host_mirror_custom";
+    gameMode?: PazaakGameMode;
   },
 ): Promise<PazaakLobbyRecord> {
+  if (isNakamaBackend()) {
+    const data = await nakamaRpc<{ lobby: Record<string, unknown> }>(accessToken, "pazaak.lobby_create", input as object);
+    if (!data.lobby) throw new Error("Lobby was not created.");
+    return normalizeNakamaLobby(data.lobby);
+  }
   const data = await apiFetch<LobbyResponse>("/api/lobbies", accessToken, {
     method: "POST",
     body: JSON.stringify(input),
@@ -294,6 +664,11 @@ export async function createLobby(
 }
 
 export async function joinLobby(accessToken: string, lobbyId: string, password?: string): Promise<PazaakLobbyRecord> {
+  if (isNakamaBackend()) {
+    const data = await nakamaRpc<{ lobby: Record<string, unknown> | null }>(accessToken, "pazaak.lobby_join", { lobbyId, password });
+    if (!data.lobby) throw new Error("Lobby was not joined.");
+    return normalizeNakamaLobby(data.lobby);
+  }
   const data = await apiFetch<LobbyResponse>(`/api/lobbies/${encodeURIComponent(lobbyId)}/join`, accessToken, {
     method: "POST",
     body: JSON.stringify({ password }),
@@ -303,6 +678,11 @@ export async function joinLobby(accessToken: string, lobbyId: string, password?:
 }
 
 export async function joinLobbyByCode(accessToken: string, lobbyCode: string, password?: string): Promise<PazaakLobbyRecord> {
+  if (isNakamaBackend()) {
+    const data = await nakamaRpc<{ lobby: Record<string, unknown> | null }>(accessToken, "pazaak.lobby_join", { lobbyCode, password });
+    if (!data.lobby) throw new Error("Lobby was not joined.");
+    return normalizeNakamaLobby(data.lobby);
+  }
   const data = await apiFetch<LobbyResponse>("/api/lobbies/join-by-code", accessToken, {
     method: "POST",
     body: JSON.stringify({ lobbyCode, password }),
@@ -312,6 +692,11 @@ export async function joinLobbyByCode(accessToken: string, lobbyCode: string, pa
 }
 
 export async function setLobbyReady(accessToken: string, lobbyId: string, ready: boolean): Promise<PazaakLobbyRecord> {
+  if (isNakamaBackend()) {
+    const data = await nakamaRpc<{ lobby: Record<string, unknown> | null }>(accessToken, "pazaak.lobby_ready", { lobbyId, ready });
+    if (!data.lobby) throw new Error("Lobby was not updated.");
+    return normalizeNakamaLobby(data.lobby);
+  }
   const data = await apiFetch<LobbyResponse>(`/api/lobbies/${encodeURIComponent(lobbyId)}/ready`, accessToken, {
     method: "POST",
     body: JSON.stringify({ ready }),
@@ -321,6 +706,11 @@ export async function setLobbyReady(accessToken: string, lobbyId: string, ready:
 }
 
 export async function setLobbyStatus(accessToken: string, lobbyId: string, status: "waiting" | "matchmaking"): Promise<PazaakLobbyRecord> {
+  if (isNakamaBackend()) {
+    const data = await nakamaRpc<{ lobby: Record<string, unknown> | null }>(accessToken, "pazaak.lobby_status", { lobbyId, status });
+    if (!data.lobby) throw new Error("Lobby status was not updated.");
+    return normalizeNakamaLobby(data.lobby);
+  }
   const data = await apiFetch<LobbyResponse>(`/api/lobbies/${encodeURIComponent(lobbyId)}/status`, accessToken, {
     method: "POST",
     body: JSON.stringify({ status }),
@@ -330,6 +720,15 @@ export async function setLobbyStatus(accessToken: string, lobbyId: string, statu
 }
 
 export async function updateLobbyAiDifficulty(accessToken: string, lobbyId: string, aiUserId: string, difficulty: AdvisorDifficulty): Promise<PazaakLobbyRecord> {
+  if (isNakamaBackend()) {
+    const data = await nakamaRpc<{ lobby: Record<string, unknown> | null }>(
+      accessToken,
+      "pazaak.lobby_ai_difficulty",
+      { lobbyId, aiUserId, difficulty },
+    );
+    if (!data.lobby) throw new Error("Lobby AI seat was not updated.");
+    return normalizeNakamaLobby(data.lobby);
+  }
   const data = await apiFetch<LobbyResponse>(`/api/lobbies/${encodeURIComponent(lobbyId)}/ai/${encodeURIComponent(aiUserId)}/difficulty`, accessToken, {
     method: "POST",
     body: JSON.stringify({ difficulty }),
@@ -339,6 +738,11 @@ export async function updateLobbyAiDifficulty(accessToken: string, lobbyId: stri
 }
 
 export async function addLobbyAi(accessToken: string, lobbyId: string, difficulty: AdvisorDifficulty): Promise<PazaakLobbyRecord> {
+  if (isNakamaBackend()) {
+    const data = await nakamaRpc<{ lobby: Record<string, unknown> | null }>(accessToken, "pazaak.lobby_add_ai", { lobbyId, difficulty });
+    if (!data.lobby) throw new Error("AI seat was not added.");
+    return normalizeNakamaLobby(data.lobby);
+  }
   const data = await apiFetch<LobbyResponse>(`/api/lobbies/${encodeURIComponent(lobbyId)}/addAi`, accessToken, {
     method: "POST",
     body: JSON.stringify({ difficulty }),
@@ -348,18 +752,38 @@ export async function addLobbyAi(accessToken: string, lobbyId: string, difficult
 }
 
 export async function leaveLobby(accessToken: string, lobbyId: string): Promise<PazaakLobbyRecord | null> {
+  if (isNakamaBackend()) {
+    const data = await nakamaRpc<{ lobby: Record<string, unknown> | null }>(accessToken, "pazaak.lobby_leave", { lobbyId });
+    return data.lobby ? normalizeNakamaLobby(data.lobby) : null;
+  }
   const data = await apiFetch<LobbyResponse>(`/api/lobbies/${encodeURIComponent(lobbyId)}/leave`, accessToken, { method: "POST" });
   return data.lobby;
 }
 
 export async function startLobby(accessToken: string, lobbyId: string): Promise<{ lobby: PazaakLobbyRecord; match: SerializedMatch }> {
+  if (isNakamaBackend()) {
+    const data = await nakamaRpc<{ lobby: Record<string, unknown> | null; match: SerializedMatch | null }>(
+      accessToken,
+      "pazaak.lobby_start",
+      { lobbyId },
+    );
+    if (!data.lobby || !data.match) throw new Error("Lobby did not start a match.");
+    return { lobby: normalizeNakamaLobby(data.lobby), match: data.match };
+  }
   const data = await apiFetch<LobbyResponse>(`/api/lobbies/${encodeURIComponent(lobbyId)}/start`, accessToken, { method: "POST" });
   if (!data.lobby || !data.match) throw new Error("Lobby did not start a match.");
   return { lobby: data.lobby, match: data.match };
 }
 
-/** Fetch the caller's active match, or null if none exists. */
 export async function fetchMyMatch(accessToken: string): Promise<SerializedMatch | null> {
+  if (isNakamaBackend()) {
+    try {
+      const data = await nakamaRpc<{ match: SerializedMatch | null }>(accessToken, "pazaak.match_get", {});
+      return data.match ?? null;
+    } catch {
+      return null;
+    }
+  }
   try {
     const data = await apiFetch<MatchResponse>("/api/match/me", accessToken);
     return data.match;
@@ -369,8 +793,16 @@ export async function fetchMyMatch(accessToken: string): Promise<SerializedMatch
   }
 }
 
-/** Fetch a match by ID. */
 export async function fetchMatch(matchId: string, accessToken: string): Promise<SerializedMatch | null> {
+  if (isNakamaBackend()) {
+    if (!accessToken) return null;
+    try {
+      const data = await nakamaRpc<{ match: SerializedMatch | null }>(accessToken, "pazaak.match_get", { matchId });
+      return data.match ?? null;
+    } catch {
+      return null;
+    }
+  }
   try {
     const data = await apiFetch<MatchResponse>(`/api/match/${matchId}`, accessToken);
     return data.match;
@@ -381,6 +813,10 @@ export async function fetchMatch(matchId: string, accessToken: string): Promise<
 }
 
 export async function fetchSideboards(accessToken: string): Promise<SavedSideboardCollectionRecord> {
+  if (isNakamaBackend()) {
+    const data = await nakamaRpc<SideboardsResponse>(accessToken, "pazaak.sideboards_get", {});
+    return data.sideboards;
+  }
   const data = await apiFetch<SideboardsResponse>("/api/sideboards", accessToken);
   return data.sideboards;
 }
@@ -391,6 +827,10 @@ export async function saveSideboard(
   accessToken: string,
   makeActive = true,
 ): Promise<SavedSideboardCollectionRecord> {
+  if (isNakamaBackend()) {
+    const data = await nakamaRpc<SideboardsResponse>(accessToken, "pazaak.sideboard_save", { name, tokens, makeActive });
+    return data.sideboards;
+  }
   const data = await apiFetch<SideboardsResponse>(`/api/sideboards/${encodeURIComponent(name)}`, accessToken, {
     method: "PUT",
     body: JSON.stringify({ tokens, makeActive }),
@@ -399,6 +839,10 @@ export async function saveSideboard(
 }
 
 export async function setActiveSideboard(name: string, accessToken: string): Promise<SavedSideboardCollectionRecord> {
+  if (isNakamaBackend()) {
+    const data = await nakamaRpc<SideboardsResponse>(accessToken, "pazaak.sideboard_active", { name });
+    return data.sideboards;
+  }
   const data = await apiFetch<SideboardsResponse>("/api/sideboards/active", accessToken, {
     method: "POST",
     body: JSON.stringify({ name }),
@@ -407,23 +851,57 @@ export async function setActiveSideboard(name: string, accessToken: string): Pro
 }
 
 export async function deleteSideboard(name: string, accessToken: string): Promise<SavedSideboardCollectionRecord> {
+  if (isNakamaBackend()) {
+    const data = await nakamaRpc<SideboardsResponse>(accessToken, "pazaak.sideboard_delete", { name });
+    return data.sideboards;
+  }
   const data = await apiFetch<SideboardsResponse>(`/api/sideboards/${encodeURIComponent(name)}`, accessToken, {
     method: "DELETE",
   });
   return data.sideboards;
 }
 
+export async function fetchTraskSources(accessToken: string): Promise<TraskSourceRecord[]> {
+  const data = await apiFetch<{ sources: TraskSourceRecord[] }>("/api/trask/sources", accessToken);
+  return data.sources;
+}
+
+export async function probeTraskAvailable(accessToken: string): Promise<boolean> {
+  try {
+    await fetchTraskSources(accessToken);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export async function fetchTraskHistory(accessToken: string, limit = 25): Promise<TraskQueryRecord[]> {
+  const data = await apiFetch<{ history: TraskQueryRecord[] }>(`/api/trask/history?limit=${encodeURIComponent(String(limit))}`, accessToken);
+  return data.history;
+}
+
+export async function askTrask(accessToken: string, query: string): Promise<TraskQueryRecord> {
+  const data = await apiFetch<{ query: TraskQueryRecord }>("/api/trask/ask", accessToken, {
+    method: "POST",
+    body: JSON.stringify({ query }),
+  });
+  return data.query;
+}
+
 export async function draw(matchId: string, accessToken: string): Promise<SerializedMatch> {
+  if (isNakamaBackend()) return nakamaMove(accessToken, matchId, { type: "draw" });
   const data = await apiFetch<MatchResponse>(`/api/match/${matchId}/draw`, accessToken, { method: "POST" });
   return data.match;
 }
 
 export async function stand(matchId: string, accessToken: string): Promise<SerializedMatch> {
+  if (isNakamaBackend()) return nakamaMove(accessToken, matchId, { type: "stand" });
   const data = await apiFetch<MatchResponse>(`/api/match/${matchId}/stand`, accessToken, { method: "POST" });
   return data.match;
 }
 
 export async function endTurn(matchId: string, accessToken: string): Promise<SerializedMatch> {
+  if (isNakamaBackend()) return nakamaMove(accessToken, matchId, { type: "end_turn" });
   const data = await apiFetch<MatchResponse>(`/api/match/${matchId}/endturn`, accessToken, { method: "POST" });
   return data.match;
 }
@@ -433,6 +911,13 @@ export async function playSideCard(
   accessToken: string,
   option: SideCardOption,
 ): Promise<SerializedMatch> {
+  if (isNakamaBackend()) {
+    return nakamaMove(accessToken, matchId, {
+      type: "play_side",
+      cardId: option.cardId,
+      appliedValue: option.appliedValue,
+    });
+  }
   const data = await apiFetch<MatchResponse>(`/api/match/${matchId}/play`, accessToken, {
     method: "POST",
     body: JSON.stringify({ cardId: option.cardId, appliedValue: option.appliedValue }),
@@ -441,13 +926,10 @@ export async function playSideCard(
 }
 
 export async function forfeit(matchId: string, accessToken: string): Promise<SerializedMatch> {
+  if (isNakamaBackend()) return nakamaMove(accessToken, matchId, { type: "forfeit" });
   const data = await apiFetch<MatchResponse>(`/api/match/${matchId}/forfeit`, accessToken, { method: "POST" });
   return data.match;
 }
-
-// ---------------------------------------------------------------------------
-// WebSocket subscription
-// ---------------------------------------------------------------------------
 
 export interface ChatMessage {
   id: string;
@@ -460,13 +942,15 @@ export interface ChatMessage {
 
 export type MatchUpdateHandler = (match: SerializedMatch) => void;
 
-export type MatchSocketConnectionState = "connecting" | "connected" | "reconnecting" | "disconnected";
+export type MatchSocketConnectionState = RealtimeConnectionState;
 
 export interface MatchSubscriptionOptions {
   reconnect?: boolean;
   maxDelayMs?: number;
   onConnectionChange?: (state: MatchSocketConnectionState) => void;
   onChatMessage?: (msg: ChatMessage) => void;
+  /** Nakama authoritative match id (from SerializedMatch.nakamaMatchId). */
+  nakamaMatchId?: string;
 }
 
 interface MatchUpdateWsMessage {
@@ -486,175 +970,257 @@ interface LobbyWsMessage {
   data: PazaakLobbyRecord | PazaakLobbyRecord[];
 }
 
-/**
- * Opens a WebSocket connection that listens for live match updates.
- * Returns an unsubscribe function.
- */
-export function subscribeToMatch(matchId: string, onUpdate: MatchUpdateHandler, options: MatchSubscriptionOptions = {}): () => void {
-  const wsBase = window.location.origin.replace(/^http/, "ws");
-  const reconnect = options.reconnect !== false;
-  const maxDelayMs = options.maxDelayMs ?? 8000;
+export function subscribeToMatch(
+  matchId: string,
+  accessToken: string,
+  onUpdate: MatchUpdateHandler,
+  options: MatchSubscriptionOptions = {},
+): () => void {
+  if (isNakamaBackend()) {
+    let cancelled = false;
+    let socket: DefaultSocket | null = null;
+    const scheduleReconnect = () => {
+      /* Nakama socket adapter reconnect is manual; keep simple single connection for MVP. */
+    };
 
-  let socket: WebSocket | null = null;
-  let retryCount = 0;
-  let active = true;
-  let reconnectTimer: number | undefined;
-
-  const setConnectionState = (state: MatchSocketConnectionState) => {
-    options.onConnectionChange?.(state);
-  };
-
-  const clearReconnectTimer = () => {
-    if (reconnectTimer !== undefined) {
-      window.clearTimeout(reconnectTimer);
-      reconnectTimer = undefined;
-    }
-  };
-
-  const connect = () => {
-    if (!active) return;
-
-    setConnectionState(retryCount === 0 ? "connecting" : "reconnecting");
-    socket = new WebSocket(`${wsBase}/ws?matchId=${encodeURIComponent(matchId)}`);
-
-    socket.addEventListener("open", () => {
-      retryCount = 0;
-      setConnectionState("connected");
-    });
-
-    socket.addEventListener("message", (event) => {
+    const run = async () => {
+      options.onConnectionChange?.("connecting");
       try {
-        const msg = JSON.parse(event.data as string) as WsMessage;
-        if (msg.type === "match_update") {
-          onUpdate(msg.data);
-        } else if (msg.type === "chat_message") {
-          options.onChatMessage?.(msg.data);
+        const session = await sessionFromPazaakAccessToken(accessToken);
+        let nakamaMatchId = options.nakamaMatchId;
+        if (!nakamaMatchId) {
+          const snap = await nakamaMatchSnapshot(accessToken, matchId);
+          nakamaMatchId = snap.nakamaMatchId;
         }
+        if (!nakamaMatchId || cancelled) {
+          options.onConnectionChange?.("disconnected");
+          return;
+        }
+
+        socket = getNakamaClient().createSocket(nakamaUseSsl()) as DefaultSocket;
+        socket.onmatchdata = (md) => {
+          if (md.match_id !== nakamaMatchId) return;
+          if (md.op_code === NAKAMA_OP_SNAPSHOT) {
+            const snap = decodeSnapshotPayload(md.data);
+            if (snap) onUpdate(snap);
+          } else if (md.op_code === NAKAMA_OP_CHAT) {
+            const msg = decodeChatMessagePayload(md.data);
+            if (msg) options.onChatMessage?.(msg);
+          } else if (md.op_code === NAKAMA_OP_ERROR) {
+            try {
+              const text = new TextDecoder().decode(md.data);
+              const err = JSON.parse(text) as { error?: string };
+              if (err?.error) console.warn("[pazaak nakama]", err.error);
+            } catch {
+              /* ignore */
+            }
+          }
+        };
+        socket.ondisconnect = () => {
+          if (!cancelled) options.onConnectionChange?.("disconnected");
+        };
+
+        await socket.connect(session, false);
+        if (cancelled) {
+          socket.disconnect(false);
+          return;
+        }
+        await socket.joinMatch(nakamaMatchId);
+        options.onConnectionChange?.("connected");
       } catch {
-        // Ignore malformed messages.
+        options.onConnectionChange?.("disconnected");
+        scheduleReconnect();
       }
-    });
+    };
 
-    socket.addEventListener("close", () => {
-      if (!active) {
-        setConnectionState("disconnected");
-        return;
+    void run();
+
+    return () => {
+      cancelled = true;
+      socket?.disconnect(false);
+      socket = null;
+    };
+  }
+
+  return subscribeToReconnectingWebSocket<WsMessage>({
+    createUrl: () => `${apiClient.resolveWebSocketBase()}/ws?matchId=${encodeURIComponent(matchId)}`,
+    reconnect: options.reconnect,
+    maxDelayMs: options.maxDelayMs,
+    onConnectionChange: options.onConnectionChange,
+    onMessage: (msg: WsMessage) => {
+      if (msg.type === "match_update") {
+        onUpdate(msg.data);
+      } else if (msg.type === "chat_message") {
+        options.onChatMessage?.(msg.data);
       }
-
-      if (!reconnect) {
-        setConnectionState("disconnected");
-        return;
-      }
-
-      retryCount += 1;
-      const delay = Math.min(maxDelayMs, 400 * (2 ** Math.min(retryCount, 5)));
-      setConnectionState("reconnecting");
-      clearReconnectTimer();
-      reconnectTimer = window.setTimeout(connect, delay);
-    });
-
-    socket.addEventListener("error", () => {
-      // Let close handle reconnect behavior.
-    });
-  };
-
-  connect();
-
-  return () => {
-    active = false;
-    clearReconnectTimer();
-    setConnectionState("disconnected");
-    socket?.close();
-  };
+    },
+  });
 }
 
 export type LobbyUpdateHandler = () => void;
 
-/**
- * Opens a WebSocket connection for lobby updates.
- * Emits callback whenever lobby state changes server-side.
- */
 export function subscribeToLobbies(onUpdate: LobbyUpdateHandler, options: MatchSubscriptionOptions = {}): () => void {
-  const wsBase = window.location.origin.replace(/^http/, "ws");
-  const reconnect = options.reconnect !== false;
-  const maxDelayMs = options.maxDelayMs ?? 8000;
-
-  let socket: WebSocket | null = null;
-  let retryCount = 0;
-  let active = true;
-  let reconnectTimer: number | undefined;
-
-  const setConnectionState = (state: MatchSocketConnectionState) => {
-    options.onConnectionChange?.(state);
-  };
-
-  const clearReconnectTimer = () => {
-    if (reconnectTimer !== undefined) {
-      window.clearTimeout(reconnectTimer);
-      reconnectTimer = undefined;
-    }
-  };
-
-  const connect = () => {
-    if (!active) return;
-
-    setConnectionState(retryCount === 0 ? "connecting" : "reconnecting");
-    socket = new WebSocket(`${wsBase}/ws?stream=lobbies`);
-
-    socket.addEventListener("open", () => {
-      retryCount = 0;
-      setConnectionState("connected");
-    });
-
-    socket.addEventListener("message", (event) => {
-      try {
-        const msg = JSON.parse(event.data as string) as LobbyWsMessage;
-        if (msg.type === "lobby_update" || msg.type === "lobby_list_update") {
-          onUpdate();
-        }
-      } catch {
-        // Ignore malformed messages.
+  if (isNakamaBackend()) {
+    const id = window.setInterval(() => {
+      onUpdate();
+    }, 4000);
+    return () => window.clearInterval(id);
+  }
+  return subscribeToReconnectingWebSocket<LobbyWsMessage>({
+    createUrl: () => `${apiClient.resolveWebSocketBase()}/ws?stream=lobbies`,
+    reconnect: options.reconnect,
+    maxDelayMs: options.maxDelayMs,
+    onConnectionChange: options.onConnectionChange,
+    onMessage: (msg: LobbyWsMessage) => {
+      if (msg.type === "lobby_update" || msg.type === "lobby_list_update") {
+        onUpdate();
       }
-    });
-
-    socket.addEventListener("close", () => {
-      if (!active) {
-        setConnectionState("disconnected");
-        return;
-      }
-
-      if (!reconnect) {
-        setConnectionState("disconnected");
-        return;
-      }
-
-      retryCount += 1;
-      const delay = Math.min(maxDelayMs, 400 * (2 ** Math.min(retryCount, 5)));
-      setConnectionState("reconnecting");
-      clearReconnectTimer();
-      reconnectTimer = window.setTimeout(connect, delay);
-    });
-
-    socket.addEventListener("error", () => {
-      // Let close handle reconnect behavior.
-    });
-  };
-
-  connect();
-
-  return () => {
-    active = false;
-    clearReconnectTimer();
-    setConnectionState("disconnected");
-    socket?.close();
-  };
+    },
+  });
 }
 
-// ---------------------------------------------------------------------------
-// Chat
-// ---------------------------------------------------------------------------
+export interface TournamentsListResponse {
+  tournaments: TournamentStateRecord[];
+}
+
+export interface TournamentDetailResponse {
+  tournament: TournamentStateRecord;
+  bracket: TournamentBracketViewRecord;
+  standings: SwissStandingsRowRecord[] | null;
+}
+
+export interface CreateTournamentInput {
+  name: string;
+  format: TournamentFormat;
+  gameMode?: PazaakGameMode;
+  setsPerMatch?: number;
+  rounds?: number;
+  maxParticipants?: number | null;
+}
+
+export async function fetchTournaments(accessToken: string): Promise<TournamentStateRecord[]> {
+  if (isNakamaBackend()) {
+    const data = await nakamaRpc<TournamentsListResponse>(accessToken, "pazaak.tournaments_list", {});
+    return data.tournaments ?? [];
+  }
+  const data = await apiFetch<TournamentsListResponse>("/api/tournaments", accessToken);
+  return data.tournaments;
+}
+
+export async function fetchTournament(accessToken: string, tournamentId: string): Promise<TournamentDetailResponse> {
+  if (isNakamaBackend()) {
+    return nakamaRpc<TournamentDetailResponse>(accessToken, "pazaak.tournament_detail", { tournamentId });
+  }
+  return apiFetch<TournamentDetailResponse>(`/api/tournaments/${encodeURIComponent(tournamentId)}`, accessToken);
+}
+
+export async function createTournament(accessToken: string, input: CreateTournamentInput): Promise<TournamentStateRecord> {
+  if (isNakamaBackend()) {
+    const data = await nakamaRpc<{ tournament: TournamentStateRecord }>(accessToken, "pazaak.tournament_create", input as object);
+    return data.tournament;
+  }
+  const data = await apiFetch<{ tournament: TournamentStateRecord }>("/api/tournaments", accessToken, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+  return data.tournament;
+}
+
+export async function joinTournament(accessToken: string, tournamentId: string): Promise<TournamentStateRecord> {
+  if (isNakamaBackend()) {
+    const data = await nakamaRpc<{ tournament: TournamentStateRecord }>(accessToken, "pazaak.tournament_join", { tournamentId });
+    return data.tournament;
+  }
+  const data = await apiFetch<{ tournament: TournamentStateRecord }>(`/api/tournaments/${encodeURIComponent(tournamentId)}/join`, accessToken, { method: "POST" });
+  return data.tournament;
+}
+
+export async function leaveTournament(accessToken: string, tournamentId: string): Promise<TournamentStateRecord> {
+  if (isNakamaBackend()) {
+    const data = await nakamaRpc<{ tournament: TournamentStateRecord }>(accessToken, "pazaak.tournament_leave", { tournamentId });
+    return data.tournament;
+  }
+  const data = await apiFetch<{ tournament: TournamentStateRecord }>(`/api/tournaments/${encodeURIComponent(tournamentId)}/leave`, accessToken, { method: "POST" });
+  return data.tournament;
+}
+
+export async function startTournament(accessToken: string, tournamentId: string): Promise<TournamentStateRecord> {
+  if (isNakamaBackend()) {
+    const data = await nakamaRpc<{ tournament: TournamentStateRecord }>(accessToken, "pazaak.tournament_start", { tournamentId });
+    return data.tournament;
+  }
+  const data = await apiFetch<{ tournament: TournamentStateRecord }>(`/api/tournaments/${encodeURIComponent(tournamentId)}/start`, accessToken, { method: "POST" });
+  return data.tournament;
+}
+
+export async function reportTournamentMatch(
+  accessToken: string,
+  tournamentId: string,
+  matchId: string,
+  winnerUserId: string | null,
+): Promise<{ tournament: TournamentStateRecord; tournamentCompleted: boolean }> {
+  if (isNakamaBackend()) {
+    return nakamaRpc<{ tournament: TournamentStateRecord; tournamentCompleted: boolean }>(accessToken, "pazaak.tournament_report", {
+      tournamentId,
+      matchId,
+      winnerUserId,
+    });
+  }
+  return apiFetch<{ tournament: TournamentStateRecord; tournamentCompleted: boolean }>(
+    `/api/tournaments/${encodeURIComponent(tournamentId)}/report`,
+    accessToken,
+    {
+      method: "POST",
+      body: JSON.stringify({ matchId, winnerUserId }),
+    },
+  );
+}
+
+export async function cancelTournament(accessToken: string, tournamentId: string): Promise<TournamentStateRecord> {
+  if (isNakamaBackend()) {
+    const data = await nakamaRpc<{ tournament: TournamentStateRecord }>(accessToken, "pazaak.tournament_cancel", { tournamentId });
+    return data.tournament;
+  }
+  const data = await apiFetch<{ tournament: TournamentStateRecord }>(`/api/tournaments/${encodeURIComponent(tournamentId)}/cancel`, accessToken, { method: "POST" });
+  return data.tournament;
+}
+
+export interface TournamentSubscriptionEvent {
+  event: "tournament.updated" | "match.scheduled" | "round.advanced";
+  tournamentId: string;
+  matchId?: string;
+  summary: TournamentStateRecord;
+}
+
+export function subscribeToTournaments(
+  tournamentId: string,
+  onEvent: (event: TournamentSubscriptionEvent) => void,
+  options: MatchSubscriptionOptions = {},
+): () => void {
+  if (isNakamaBackend()) {
+    void tournamentId;
+    void onEvent;
+    void options;
+    return () => {};
+  }
+  return subscribeToReconnectingWebSocket<TournamentSubscriptionEvent>({
+    createUrl: () => `${apiClient.resolveWebSocketBase()}/ws/tournaments/${encodeURIComponent(tournamentId)}`,
+    reconnect: options.reconnect,
+    maxDelayMs: options.maxDelayMs,
+    onConnectionChange: options.onConnectionChange,
+    onMessage: (msg: TournamentSubscriptionEvent) => {
+      if (msg && typeof msg.event === "string") {
+        onEvent(msg);
+      }
+    },
+  });
+}
 
 export async function sendChatMessage(matchId: string, accessToken: string, text: string): Promise<ChatMessage> {
+  if (isNakamaBackend()) {
+    const data = await nakamaRpc<{ message: ChatMessage }>(accessToken, "pazaak.chat_send", { matchId, text });
+    return data.message;
+  }
   const data = await apiFetch<{ message: ChatMessage }>(`/api/match/${encodeURIComponent(matchId)}/chat`, accessToken, {
     method: "POST",
     body: JSON.stringify({ text }),
@@ -663,6 +1229,10 @@ export async function sendChatMessage(matchId: string, accessToken: string, text
 }
 
 export async function fetchChatHistory(matchId: string, accessToken: string): Promise<ChatMessage[]> {
+  if (isNakamaBackend()) {
+    const data = await nakamaRpc<{ messages: ChatMessage[] }>(accessToken, "pazaak.chat_history", { matchId });
+    return data.messages ?? [];
+  }
   const data = await apiFetch<{ messages: ChatMessage[] }>(`/api/match/${encodeURIComponent(matchId)}/chat`, accessToken);
   return data.messages;
 }

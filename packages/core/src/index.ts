@@ -1,16 +1,19 @@
 import {
   Client,
   GatewayIntentBits,
+  Partials,
   REST,
   Routes,
   type RESTPostAPIApplicationCommandsJSONBody,
 } from "discord.js";
 
+type LogDetails = Error | object | string | number | boolean | null;
+
 export interface Logger {
-  info(message: string, details?: unknown): void;
-  warn(message: string, details?: unknown): void;
-  error(message: string, details?: unknown): void;
-  debug(message: string, details?: unknown): void;
+  info<T extends LogDetails = LogDetails>(message: string, details?: T): void;
+  warn<T extends LogDetails = LogDetails>(message: string, details?: T): void;
+  error<T extends LogDetails = LogDetails>(message: string, details?: T): void;
+  debug<T extends LogDetails = LogDetails>(message: string, details?: T): void;
 }
 
 export interface DiscordRuntimeConfigLike {
@@ -21,11 +24,14 @@ export interface DiscordRuntimeConfigLike {
 
 export interface ClientIntentOptions {
   guildMembers?: boolean;
+  /** Implied when `guildMessageReactions` is true (required for reaction events on guild messages). */
   guildMessages?: boolean;
   messageContent?: boolean;
+  /** Enables Guild Message Reactions intent and reaction/message/channel/user partials for uncached messages. */
+  guildMessageReactions?: boolean;
 }
 
-const writeLog = (level: string, scope: string, message: string, details?: unknown): void => {
+const writeLog = (level: string, scope: string, message: string, details?: LogDetails): void => {
   const timestamp = new Date().toISOString();
   const prefix = `[${timestamp}] [${scope}] [${level}] ${message}`;
 
@@ -53,15 +59,23 @@ export const createBotClient = (options: ClientIntentOptions = {}): Client => {
     intents.push(GatewayIntentBits.GuildMembers);
   }
 
-  if (options.guildMessages) {
+  if (options.guildMessages || options.guildMessageReactions) {
     intents.push(GatewayIntentBits.GuildMessages);
+  }
+
+  if (options.guildMessageReactions) {
+    intents.push(GatewayIntentBits.GuildMessageReactions);
   }
 
   if (options.messageContent) {
     intents.push(GatewayIntentBits.MessageContent);
   }
 
-  return new Client({ intents });
+  const partials = options.guildMessageReactions
+    ? [Partials.Message, Partials.Channel, Partials.Reaction, Partials.User]
+    : undefined;
+
+  return new Client(partials ? { intents, partials } : { intents });
 };
 
 export const deployGuildCommands = async (
@@ -108,7 +122,7 @@ export const deployGlobalCommands = async (
   });
 };
 
-export const toErrorMessage = (error: unknown): string => {
+export const toErrorMessage = <T>(error: T): string => {
   if (error instanceof Error) {
     return error.message;
   }

@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+
 import {
   PermissionFlagsBits,
   SlashCommandBuilder,
@@ -7,17 +9,48 @@ import {
 } from "discord.js";
 
 import { loadTraskBotConfig } from "@openkotor/config";
-import { createBotClient, createLogger, deployGuildCommands, toErrorMessage } from "@openkotor/core";
+import {
+  createBotClient,
+  createLogger,
+  deployGlobalCommands,
+  deployGuildCommands,
+  toErrorMessage,
+} from "@openkotor/core";
 import { buildErrorEmbed, buildInfoEmbed, buildSuccessEmbed } from "@openkotor/discord-ui";
+import { JsonTraskQueryRepository, resolveDataFile } from "@openkotor/persistence";
 import { personaProfiles } from "@openkotor/personas";
+import { trimTrailingSlashes } from "@openkotor/platform";
 import { createDefaultSearchProvider, defaultSourceCatalog, type SourceDescriptor, type SourceKind } from "@openkotor/retrieval";
+import { createResearchWizardClient } from "@openkotor/trask";
+import { isTraskThreadId } from "@openkotor/trask-http";
 
-import { createResearchWizardClient } from "./research-wizard.js";
+import { registerTraskProactiveHandlers } from "./proactive-handler.js";
+import { startEmbeddedTraskWebUi } from "./web-server.js";
 
 const logger = createLogger("trask-bot");
 const config = loadTraskBotConfig();
-const searchProvider = createDefaultSearchProvider();
+const searchProvider = createDefaultSearchProvider({ stateDir: config.chunkDir });
 const researchWizard = createResearchWizardClient(config.researchWizard);
+const queryRepository = new JsonTraskQueryRepository(resolveDataFile(config.queryDataDir, "trask-queries.json"));
+
+const traskHttpRuntime = {
+  searchProvider,
+  researchWizard,
+  queryRepository,
+};
+
+const embeddedWeb = startEmbeddedTraskWebUi({ config, runtime: traskHttpRuntime, logger });
+
+if (embeddedWeb) {
+  const shutdownWeb = (): void => {
+    void embeddedWeb.stop().then(
+      () => process.exit(0),
+      () => process.exit(1),
+    );
+  };
+  process.once("SIGINT", shutdownWeb);
+  process.once("SIGTERM", shutdownWeb);
+}
 
 const sourceChoices = defaultSourceCatalog.map((source) => ({
   name: source.name,
@@ -33,6 +66,13 @@ const askCommand = new SlashCommandBuilder()
       .setDescription("What should Trask look up?")
       .setRequired(true)
       .setMaxLength(200);
+  })
+  .addStringOption((option) => {
+    return option
+      .setName("thread")
+      .setDescription("Optional Holocron thread UUID from a browser link (?thread=…).")
+      .setRequired(false)
+      .setMaxLength(36);
   });
 
 const sourcesCommand = new SlashCommandBuilder()
@@ -53,7 +93,7 @@ const sourcesCommand = new SlashCommandBuilder()
 
 const reindexCommand = new SlashCommandBuilder()
   .setName("queue-reindex")
-  .setDescription("Queue a source refresh job in the ingest worker stub.")
+  .setDescription("Queue a source refresh job for the ingest worker.")
   .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
   .addStringOption((option) => {
     return option
@@ -147,16 +187,83 @@ const buildResearchEmbed = (rawAnswer: string, approvedSources: readonly SourceD
 
 const handleAskCommand = async (interaction: ChatInputCommandInteraction): Promise<void> => {
   const query = interaction.options.getString("query", true);
+  const threadOpt = interaction.options.getString("thread")?.trim();
+  const threadId = threadOpt && isTraskThreadId(threadOpt) ? threadOpt : randomUUID();
 
   await interaction.deferReply();
 
-  const result = await researchWizard.answerQuestion(query);
-  const embed = buildResearchEmbed(result.answer, result.approvedSources);
+  const queryId = randomUUID();
+  const createdAt = new Date().toISOString();
 
-  await interaction.editReply({
-    embeds: [embed],
-    allowedMentions: { parse: [] },
-  });
+  try {
+    const result = await researchWizard.answerQuestion(query);
+    const completedAt = new Date().toISOString();
+    await queryRepository.append({
+      queryId,
+      threadId,
+      userId: interaction.user.id,
+      query,
+      status: "complete",
+      answer: result.answer,
+      sources: result.approvedSources.map((source) => ({
+        id: source.id,
+        name: source.name,
+        url: source.homeUrl,
+      })),
+      error: null,
+      createdAt,
+      completedAt,
+    });
+    let embed = buildResearchEmbed(result.answer, result.approvedSources);
+    const holocronBase = config.holocronPublicUrl?.trim();
+    if (holocronBase) {
+      const url = `${trimTrailingSlashes(holocronBase)}?thread=${encodeURIComponent(threadId)}`;
+      embed = embed.addFields({
+        name: "Holocron",
+        value: `[Continue this thread in the browser](${url})`,
+        inline: false,
+      });
+    }
+
+    await interaction.editReply({
+      embeds: [embed],
+      allowedMentions: { parse: [] },
+    });
+  } catch (error) {
+    const message = toErrorMessage(error);
+    const completedAt = new Date().toISOString();
+    await queryRepository.append({
+      queryId,
+      threadId,
+      userId: interaction.user.id,
+      query,
+      status: "failed",
+      answer: null,
+      sources: [],
+      error: message,
+      createdAt,
+      completedAt,
+    });
+
+    let errorEmbed = buildErrorEmbed({
+      title: "Research Failed",
+      description: message,
+    });
+    const holocronBaseErr = config.holocronPublicUrl?.trim();
+    if (holocronBaseErr) {
+      const url = `${trimTrailingSlashes(holocronBaseErr)}?thread=${encodeURIComponent(threadId)}`;
+      errorEmbed = errorEmbed.addFields({
+        name: "Holocron",
+        value: `[Open this thread in the browser](${url})`,
+        inline: false,
+      });
+    }
+
+    await interaction.editReply({
+      embeds: [errorEmbed],
+      allowedMentions: { parse: [] },
+    });
+  }
 };
 
 const handleSourcesCommand = async (interaction: ChatInputCommandInteraction): Promise<void> => {
@@ -186,7 +293,7 @@ const handleReindexCommand = async (interaction: ChatInputCommandInteraction): P
 
   const embed = buildSuccessEmbed({
     title: "Refresh Queued",
-    description: `Queued ${result.queuedSourceIds.length} source refresh request(s) in stub mode. The ingest worker implementation is the next phase.`,
+    description: `Queued ${result.queuedSourceIds.length} source refresh request(s). The ingest worker queue has been updated.`,
   });
 
   await interaction.reply({
@@ -219,7 +326,27 @@ const dispatchChatCommand = async (interaction: ChatInputCommandInteraction): Pr
   }
 };
 
-const client = createBotClient();
+const proactiveChannelIds =
+  config.proactive.channelIds.length > 0 ? config.proactive.channelIds : config.approvedChannelIds;
+
+const proactiveRuntimeReady =
+  config.proactive.enabled && proactiveChannelIds.length > 0 && Boolean(config.ai.openAiApiKey);
+
+const client = createBotClient(
+  proactiveRuntimeReady ? { guildMessages: true, messageContent: true } : {},
+);
+
+if (config.proactive.enabled && !proactiveRuntimeReady) {
+  logger.warn("TRASK_PROACTIVE_ENABLED is set but proactive mode cannot start.", {
+    hasOpenAiKey: Boolean(config.ai.openAiApiKey),
+    resolvedProactiveChannelCount: proactiveChannelIds.length,
+    hint: "Set TRASK_APPROVED_CHANNEL_IDS or TRASK_PROACTIVE_CHANNEL_IDS and provide OPENAI_API_KEY (or OPENROUTER_API_KEY).",
+  });
+}
+
+if (proactiveRuntimeReady) {
+  registerTraskProactiveHandlers(client, config, researchWizard, logger, queryRepository);
+}
 
 client.once("ready", (readyClient) => {
   logger.info("Trask is online.", {
@@ -274,7 +401,7 @@ client.on("interactionCreate", async (interaction) => {
   try {
     await dispatchChatCommand(interaction);
   } catch (error) {
-    logger.error("Trask command failed.", error);
+    logger.error("Trask command failed.", error instanceof Error ? error : { error: String(error) });
 
     const payload = {
       embeds: [
@@ -295,6 +422,27 @@ client.on("interactionCreate", async (interaction) => {
   }
 });
 
+const resolveSlashGuildTargets = (): string[] => {
+  if (config.slashCommandGuildIds.length > 0) {
+    return config.slashCommandGuildIds;
+  }
+
+  if (config.discord.guildId) {
+    return [config.discord.guildId];
+  }
+
+  return [];
+};
+
 const deployables = commands.map((command) => command.toJSON() as RESTPostAPIApplicationCommandsJSONBody);
-await deployGuildCommands(config.discord, deployables, logger);
+const slashGuildTargets = resolveSlashGuildTargets();
+
+if (slashGuildTargets.length > 0) {
+  for (const guildId of slashGuildTargets) {
+    await deployGuildCommands({ ...config.discord, guildId }, deployables, logger);
+  }
+} else {
+  await deployGlobalCommands(config.discord, deployables, logger);
+}
+
 await client.login(config.discord.botToken);

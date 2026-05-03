@@ -17,10 +17,22 @@
       "path": "../../packages/discord-ui"
     },
     {
+      "path": "../../packages/persistence"
+    },
+    {
       "path": "../../packages/personas"
     },
     {
+      "path": "../../packages/platform"
+    },
+    {
       "path": "../../packages/retrieval"
+    },
+    {
+      "path": "../../packages/trask"
+    },
+    {
+      "path": "../../packages/trask-http"
     }
   ],
   "include": [

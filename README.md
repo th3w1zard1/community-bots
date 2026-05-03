@@ -65,6 +65,7 @@ Implements its logic by:
 ```text
 apps/
   trask-bot/
+  trask-http-server/
   hk-bot/
   pazaak-bot/
   ingest-worker/
@@ -75,6 +76,8 @@ packages/
   persistence/
   personas/
   retrieval/
+  trask/
+  trask-http/
 vendor/
   ai-researchwizard/
 docs/
@@ -88,12 +91,14 @@ infra/
 3. Build the workspace with `corepack pnpm build`.
 4. Run one bot at a time with one of:
    - `corepack pnpm dev:trask`
-   - `corepack pnpm dev:hk`
-  - `corepack pnpm dev:pazaak`
+   - `corepack pnpm dev:trask-http` (REST + optional static `vendor/qa-webui` build)
+   - `corepack pnpm dev:hk` (HK guide on the [wiki](https://github.com/OpenKotOR/community-bots/wiki/docs/guides/hk-86); reaction panels use `data/hk-bot/reaction-role-panels.json` — start from `apps/hk-bot/reaction-role-panels.example.json`; `/designations reactions help` in Discord prints setup steps; static Discord bots hub when deployed: https://openkotor.github.io/bots/hk86)
+   - `corepack pnpm dev:pazaak`
    - `corepack pnpm dev:ingest`
 
-Trask also expects an `ai-researchwizard` backend to be reachable at `TRASK_RESEARCHWIZARD_BASE_URL`.
-The vendored source lives in `vendor/ai-researchwizard` as a git submodule.
+Trask runs **headless GPT Researcher** from `vendor/ai-researchwizard` (see `TRASK_GPT_RESEARCHER_ROOT` /
+`TRASK_GPT_RESEARCHER_PYTHON`); it does **not** require the FastAPI/Web UI server. The vendored tree lives in
+`vendor/ai-researchwizard` (often as a git submodule).
 
 All bots auto-register guild-scoped commands when their corresponding `*_DISCORD_GUILD_ID` is present.
 You can also set `DISCORD_TARGET_GUILD_ID` once and let all three bots target the same guild by default.

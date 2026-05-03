@@ -1,0 +1,82 @@
+# Optional: deploy PazaakWorld to Vercel when token + project IDs are configured (GitHub Pages remains primary in deploy-pazaakworld.yml).
+name: Deploy PazaakWorld (Vercel)
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - "apps/pazaak-world/**"
+      - "packages/**"
+      - "pnpm-lock.yaml"
+      - "pnpm-workspace.yaml"
+      - ".github/workflows/deploy-pazaakworld-vercel.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  vercel:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check Vercel secrets
+        id: chk
+        shell: bash
+        env:
+          T: ${{ secrets.VERCEL_TOKEN }}
+          O: ${{ secrets.VERCEL_ORG_ID }}
+          P: ${{ secrets.VERCEL_PROJECT_ID }}
+        run: |
+          if [ -n "$T" ] && [ -n "$O" ] && [ -n "$P" ]; then
+            echo "go=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "go=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Skipping Vercel — set VERCEL_TOKEN, VERCEL_ORG_ID, VERCEL_PROJECT_ID (from \`vercel link\` .vercel/project.json)."
+          fi
+
+      - uses: actions/checkout@v4
+        if: steps.chk.outputs.go == 'true'
+
+      - uses: pnpm/action-setup@v4
+        if: steps.chk.outputs.go == 'true'
+        with:
+          version: 10.11.0
+
+      - uses: actions/setup-node@v4
+        if: steps.chk.outputs.go == 'true'
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install
+        if: steps.chk.outputs.go == 'true'
+        run: pnpm install --frozen-lockfile
+
+      - name: Pull Vercel env
+        if: steps.chk.outputs.go == 'true'
+        working-directory: apps/pazaak-world
+        env:
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+        run: pnpm dlx vercel@latest pull --yes --environment=production --token="$VERCEL_TOKEN"
+
+      - name: Build
+        if: steps.chk.outputs.go == 'true'
+        working-directory: apps/pazaak-world
+        env:
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VITE_API_BASES: ${{ vars.PAZAAK_API_BASES }}
+        run: pnpm dlx vercel@latest build --prod --token="$VERCEL_TOKEN"
+
+      - name: Deploy prebuilt
+        if: steps.chk.outputs.go == 'true'
+        working-directory: apps/pazaak-world
+        env:
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+        run: pnpm dlx vercel@latest deploy --prebuilt --prod --token="$VERCEL_TOKEN"

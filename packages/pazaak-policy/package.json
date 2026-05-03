@@ -1,0 +1,33 @@
+{
+  "name": "@openkotor/pazaak-policy",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    },
+    "./file-loader": {
+      "import": "./dist/file-loader.js",
+      "types": "./dist/file-loader.d.ts"
+    }
+  },
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist",
+    "schema"
+  ],
+  "scripts": {
+    "build": "tsc -b",
+    "test": "pnpm run build && node --test dist/policy.test.js"
+  },
+  "dependencies": {
+    "yaml": "^2.8.0",
+    "zod": "^3.24.4"
+  },
+  "devDependencies": {
+    "typescript": "~6.0.2"
+  }
+}

@@ -15,6 +15,10 @@
     "./opponents": {
       "import": "./dist/opponents.js",
       "types": "./dist/opponents.d.ts"
+    },
+    "./rules": {
+      "import": "./dist/rules.js",
+      "types": "./dist/rules.d.ts"
     }
   },
   "main": "dist/index.js",

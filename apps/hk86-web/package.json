@@ -1,0 +1,19 @@
+{
+  "name": "hk86-web",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -p tsconfig.json && vite build",
+    "build:pages": "tsc -p tsconfig.json && node scripts/build-pages.mjs",
+    "preview": "vite preview",
+    "test:e2e": "pnpm run build && pnpm exec playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.58.0",
+    "@types/node": "^24.12.2",
+    "typescript": "~6.0.2",
+    "vite": "^8.0.4"
+  }
+}

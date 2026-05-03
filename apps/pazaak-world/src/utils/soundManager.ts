@@ -8,6 +8,12 @@ interface SoundConfig {
   effectsVolume: number;
 }
 
+type AudioContextConstructor = new () => AudioContext;
+
+interface AudioWindow extends Window {
+  webkitAudioContext?: AudioContextConstructor;
+}
+
 class SoundManager {
   private config: SoundConfig = {
     enabled: true,
@@ -22,11 +28,28 @@ class SoundManager {
     this.loadConfig();
   }
 
+  private isSoundConfig(value: unknown): value is SoundConfig {
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      return false;
+    }
+    const o = value as Record<string, unknown>;
+    return (
+      typeof o.enabled === "boolean"
+      && typeof o.musicVolume === "number"
+      && Number.isFinite(o.musicVolume)
+      && typeof o.effectsVolume === "number"
+      && Number.isFinite(o.effectsVolume)
+    );
+  }
+
   private loadConfig() {
     try {
       const stored = window.localStorage.getItem("pazaak-sound-config");
       if (stored) {
-        this.config = JSON.parse(stored);
+        const parsed: unknown = JSON.parse(stored);
+        if (this.isSoundConfig(parsed)) {
+          this.config = parsed;
+        }
       }
     } catch {
       // Use defaults
@@ -53,7 +76,11 @@ class SoundManager {
     try {
       // Initialize audio context if needed
       if (!this.audioContext) {
-        this.audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
+        const Ctor = window.AudioContext ?? (window as AudioWindow).webkitAudioContext;
+        if (!Ctor) {
+          return;
+        }
+        this.audioContext = new Ctor();
       }
 
       const ctx = this.audioContext;
@@ -106,7 +133,12 @@ class SoundManager {
 
     try {
       // Create a simple ambient tone using Web Audio API
-      const audioContext = this.audioContext || new (window.AudioContext || (window as any).webkitAudioContext)();
+      const Ctor = window.AudioContext ?? (window as AudioWindow).webkitAudioContext;
+      if (!this.audioContext && !Ctor) {
+        return;
+      }
+
+      const audioContext = this.audioContext || new Ctor();
       if (!this.audioContext) {
         this.audioContext = audioContext;
       }
@@ -225,3 +257,12 @@ class SoundManager {
 
 // Singleton instance
 export const soundManager = new SoundManager();
+
+// Convenience standalone exports used by card game components
+export const playDrawSound = () => soundManager.playDrawSound();
+export const playPositiveSound = () => soundManager.playRoundWinSound();
+export const playNegativeSound = () => soundManager.playRoundLossSound();
+export const playVictorySound = () => {
+  soundManager.playRoundWinSound();
+  setTimeout(() => soundManager.playRoundWinSound(), 300);
+};

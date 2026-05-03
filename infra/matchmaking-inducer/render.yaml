@@ -1,0 +1,19 @@
+# Optional Render Blueprint: Dashboard → New → Blueprint → paste this file or merge into repo root render.yaml.
+# Set MATCHMAKING_UPSTREAM_URL in Render dashboard (secret).
+services:
+  - type: web
+    name: matchmaking-inducer
+    runtime: docker
+    region: oregon
+    plan: free
+    dockerfilePath: ./infra/matchmaking-inducer/Dockerfile
+    dockerContext: ./infra/matchmaking-inducer
+    envVars:
+      - key: PORT
+        value: "8080"
+      - key: INDUCER_PROVIDER
+        value: render
+      - key: INDUCER_REGION
+        value: oregon
+      - key: MATCHMAKING_UPSTREAM_URL
+        sync: false

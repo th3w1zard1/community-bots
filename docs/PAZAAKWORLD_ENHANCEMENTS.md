@@ -53,7 +53,7 @@ This document outlines all the major improvements made to the Pazaak World UI an
 ### 5. **Game Asset System**
 - **PazaakAsset.tsx**: Flexible asset renderer
   - Supports images from URLs
-  - AI-generated image placeholder support (DiceBear API)
+  - Deterministic prompt+seed inline SVG generation (no external placeholder service dependency)
   - Unicode fallbacks for instant display
   - Card visualization component
   - Character portrait with difficulty display

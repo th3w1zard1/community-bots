@@ -46,7 +46,7 @@ export const pickOpponentPhrase = (
     return lines[0] ?? fallback;
   }
 
-  const filtered = lines.filter((line) => line !== previousLine);
+  const filtered = lines.filter((line: string) => line !== previousLine);
   const pool = filtered.length > 0 ? filtered : lines;
   return pool[Math.floor(Math.random() * pool.length)] ?? fallback;
 };

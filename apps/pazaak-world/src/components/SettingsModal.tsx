@@ -3,9 +3,10 @@ import { soundManager } from "../utils/soundManager.ts";
 import type {
   AdvisorDifficulty,
   PazaakCardBackStyle,
+  PazaakChatAudience,
+  PazaakSoundTheme,
   PazaakTableAmbience,
   PazaakTableTheme,
-  PazaakSoundTheme,
   PazaakUserSettings,
 } from "../types.ts";
 
@@ -46,7 +47,6 @@ const SOUND_THEMES: { id: PazaakSoundTheme; label: string; desc: string }[] = [
 // ── Defaults & equality ───────────────────────────────────────────────────────
 
 const DEFAULT_MODAL_SETTINGS: PazaakUserSettings = {
-  theme: "kotor",
   tableTheme: "ebon-hawk",
   cardBackStyle: "classic",
   tableAmbience: "cantina",
@@ -65,24 +65,27 @@ const DEFAULT_MODAL_SETTINGS: PazaakUserSettings = {
   chatAudience: "everyone",
 };
 
+const SETTINGS_EQUALITY_KEYS = [
+  "tableTheme",
+  "cardBackStyle",
+  "tableAmbience",
+  "soundEnabled",
+  "soundTheme",
+  "reducedMotionEnabled",
+  "turnTimerSeconds",
+  "preferredAiDifficulty",
+  "confirmForfeit",
+  "highlightValidPlays",
+  "focusMode",
+  "showRatingsInGame",
+  "showGuildEmblems",
+  "showHolocronStreaks",
+  "showPostMatchDebrief",
+  "chatAudience",
+] as const satisfies readonly (keyof PazaakUserSettings)[];
+
 const areSettingsEqual = (left: PazaakUserSettings, right: PazaakUserSettings): boolean => {
-  return left.theme === right.theme
-    && left.tableTheme === right.tableTheme
-    && left.cardBackStyle === right.cardBackStyle
-    && left.tableAmbience === right.tableAmbience
-    && left.soundEnabled === right.soundEnabled
-    && left.soundTheme === right.soundTheme
-    && left.reducedMotionEnabled === right.reducedMotionEnabled
-    && left.turnTimerSeconds === right.turnTimerSeconds
-    && left.preferredAiDifficulty === right.preferredAiDifficulty
-    && left.confirmForfeit === right.confirmForfeit
-    && left.highlightValidPlays === right.highlightValidPlays
-    && left.focusMode === right.focusMode
-    && left.showRatingsInGame === right.showRatingsInGame
-    && left.showGuildEmblems === right.showGuildEmblems
-    && left.showHolocronStreaks === right.showHolocronStreaks
-    && left.showPostMatchDebrief === right.showPostMatchDebrief
-    && left.chatAudience === right.chatAudience;
+  return SETTINGS_EQUALITY_KEYS.every((key) => left[key] === right[key]);
 };
 
 // ── Tab definitions ───────────────────────────────────────────────────────────

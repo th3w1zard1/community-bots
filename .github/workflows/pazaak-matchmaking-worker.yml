@@ -1,0 +1,65 @@
+name: Deploy Pazaak Matchmaking Worker
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "infra/pazaak-matchmaking-worker/**"
+      - "packages/pazaak-engine/**"
+      - "packages/pazaak-policy/**"
+      - "packages/pazaak-tournament/**"
+      - "pnpm-lock.yaml"
+      - ".github/workflows/pazaak-matchmaking-worker.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pazaak-matchmaking-worker
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check Cloudflare secrets
+        id: cf_check
+        run: |
+          if [ -n "$CLOUDFLARE_API_TOKEN" ] && [ -n "$CLOUDFLARE_ACCOUNT_ID" ]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Cloudflare secrets not configured – skipping worker deploy. Set CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID repository secrets to enable."
+          fi
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+
+      - name: Checkout
+        if: steps.cf_check.outputs.configured == 'true'
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        if: steps.cf_check.outputs.configured == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Setup pnpm
+        if: steps.cf_check.outputs.configured == 'true'
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.11.0
+
+      - name: Install workspace (worker bundle resolves workspace packages)
+        if: steps.cf_check.outputs.configured == 'true'
+        run: pnpm install --frozen-lockfile
+
+      - name: Deploy worker
+        if: steps.cf_check.outputs.configured == 'true'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: pnpm dlx wrangler@4.87.0 deploy --config infra/pazaak-matchmaking-worker/wrangler.toml

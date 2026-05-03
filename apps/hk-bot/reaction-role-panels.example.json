@@ -1,0 +1,24 @@
+{
+  "_readme": "Copy to HK_DATA_DIR/reaction-role-panels.json (default data/hk-bot/). Replace placeholders. Hot reload: file watch + mtime (no bot restart). Extra keys like _readme are ignored.",
+  "version": 1,
+  "defaultAnnounceMode": "reply",
+  "replyCooldownMs": 3000,
+  "panels": [
+    {
+      "channelId": "000000000000000000",
+      "messageId": "000000000000000000",
+      "announceMode": "reply",
+      "mappings": [
+        {
+          "emoji": "✅",
+          "roleId": "000000000000000000"
+        },
+        {
+          "_note": "Optional: multiple emojis → same role; roleNameHint matches guild role by name (case-insensitive fallback).",
+          "emojis": ["🎮", "🕹️"],
+          "roleNameHint": "Example Guild Role Name"
+        }
+      ]
+    }
+  ]
+}

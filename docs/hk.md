@@ -126,6 +126,10 @@ Observation: Missing guild roles for Script Slicer.
 Mockery: Role hierarchy prevented access to Modzilla.
 ```
 
+## Public user guide (wiki)
+
+End-user and operator documentation for HK-86 (commands, reaction panels, roles) lives on the **[community bots wiki](https://github.com/OpenKotOR/community-bots/wiki/docs/guides/hk-86)** (not in this `docs/` tree).
+
 ## Current Limitations
 
 - There are no persisted per-member designation presets yet. The sync panel reads live guild roles

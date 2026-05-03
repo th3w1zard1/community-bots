@@ -1,0 +1,136 @@
+name: Deploy PazaakWorld to GitHub Pages
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "apps/pazaak-world/**"
+      - "apps/hk86-web/**"
+      - "packages/**"
+      - "pnpm-lock.yaml"
+      - "pnpm-workspace.yaml"
+      - ".gitmodules"
+      - ".github/workflows/deploy-pazaakworld.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pazaak-world-pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      base_path: ${{ steps.base.outputs.base_path }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          # Private sibling repos (e.g. OpenKotOR/qa-trask-webui) need a PAT with repo read access.
+          token: ${{ secrets.ACTIONS_SUBMODULES_TOKEN || github.token }}
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.11.0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Resolve Pages base path
+        id: base
+        shell: bash
+        run: |
+          echo "base_path=/bots/" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve optional API base list
+        id: api
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          api_bases=""
+          if command -v gh >/dev/null 2>&1; then
+            api_bases="$(gh variable get PAZAAK_API_BASES --repo "$GITHUB_REPOSITORY" 2>/dev/null || true)"
+          fi
+          {
+            echo "api_bases<<EOF"
+            echo "$api_bases"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build PazaakWorld
+        env:
+          BASE: ${{ steps.base.outputs.base_path }}
+          VITE_API_BASES: ${{ steps.api.outputs.api_bases }}
+          VITE_REPO_BASE_URL: https://github.com/${{ github.repository }}
+          VITE_WIKI_BASE_URL: ${{ vars.WIKI_BASE_URL }}
+          VITE_TRASK_DISCORD_APPLICATION_ID: ${{ vars.TRASK_DISCORD_APP_ID }}
+          VITE_HK_DISCORD_APPLICATION_ID: ${{ vars.HK86_DISCORD_APP_ID }}
+          VITE_DISCORD_APPLICATION_ID: ${{ vars.HK86_DISCORD_APP_ID }}
+          VITE_PAZAAK_DISCORD_APPLICATION_ID: ${{ vars.PAZAAK_DISCORD_APP_ID }}
+        run: pnpm --filter pazaak-world build
+
+      - name: Build QA Trask WebUI
+        if: hashFiles('vendor/qa-webui/package.json') != ''
+        env:
+          BASE: /bots/qa-webui/
+          ENABLE_SPARK: "0"
+        run: pnpm --filter spark-template build
+
+      - name: Publish QA Trask WebUI under /bots/qa-webui/
+        if: hashFiles('vendor/qa-webui/package.json') != ''
+        run: |
+          mkdir -p apps/pazaak-world/dist/qa-webui
+          cp -R vendor/qa-webui/dist/. apps/pazaak-world/dist/qa-webui/
+
+      - name: Build Discord bots hub WebUI (hk86)
+        env:
+          BASE: /bots/hk86/
+          VITE_REPO_BASE_URL: https://github.com/${{ github.repository }}
+          VITE_WIKI_BASE_URL: ${{ vars.WIKI_BASE_URL }}
+          VITE_TRASK_DISCORD_APPLICATION_ID: ${{ vars.TRASK_DISCORD_APP_ID }}
+          VITE_HK_DISCORD_APPLICATION_ID: ${{ vars.HK86_DISCORD_APP_ID }}
+          VITE_DISCORD_APPLICATION_ID: ${{ vars.HK86_DISCORD_APP_ID }}
+          VITE_PAZAAK_DISCORD_APPLICATION_ID: ${{ vars.PAZAAK_DISCORD_APP_ID }}
+        run: pnpm --filter hk86-web build
+
+      - name: Publish HK-86 WebUI under /bots/hk86/
+        run: |
+          mkdir -p apps/pazaak-world/dist/hk86
+          cp -R apps/hk86-web/dist/. apps/pazaak-world/dist/hk86/
+
+      - name: Add SPA fallback
+        run: cp apps/pazaak-world/dist/index.html apps/pazaak-world/dist/404.html
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: apps/pazaak-world/dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

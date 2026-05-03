@@ -78,11 +78,13 @@ FIRECRAWL_API_KEY=         # optional — used by future ingest pipeline
 DATABASE_URL=              # optional — defaults to local file storage
 ```
 
-For Trask's current sidecar-backed `/ask` flow, also set:
+For Trask's headless GPT Researcher `/ask` flow (and Holocron Q&A), create a Python venv with
+`vendor/ai-researchwizard/requirements.txt` — see **`scripts/bootstrap_trask_gpt_researcher.ps1`** /
+**`scripts/bootstrap_trask_gpt_researcher.sh`** and [docs/trask.md](trask.md) — then set:
 
 ```
-TRASK_RESEARCHWIZARD_BASE_URL=http://localhost:8000
-TRASK_RESEARCHWIZARD_API_KEY=   # optional, only if your sidecar is protected
+TRASK_GPT_RESEARCHER_ROOT=vendor/ai-researchwizard
+TRASK_GPT_RESEARCHER_PYTHON=.venv-trask-gptr/Scripts/python.exe   # or bin/python on Unix
 TRASK_RESEARCHWIZARD_TIMEOUT_MS=120000
 ```
 
@@ -123,7 +125,7 @@ corepack pnpm discord:install-links
 ### Trask
 - `/ask query:mdlops` → should return a list of matching sources from the catalog.
 - `/sources` → should list all approved source entries.
-- `/queue-reindex` → should confirm stub mode and queue count.
+- `/queue-reindex` → should confirm queued source refresh count.
 
 ### HK
 - `/designations list` → should display the curated role catalog by category.
@@ -163,7 +165,8 @@ Add to your `.env`:
 ```env
 PAZAAK_DISCORD_CLIENT_SECRET=<client secret from Developer Portal>
 PAZAAK_API_PORT=4001              # port the embedded HTTP/WS server listens on (default 4001)
-PAZAAK_ACTIVITY_URL=https://pazaak.example.com   # your deployed Activity URL
+PAZAAK_ACTIVITY_URL=https://openkotor.github.io/bots/pazaakworld
+PAZAAK_PUBLIC_WEB_ORIGIN=https://openkotor.github.io/bots/pazaakworld
 ```
 
 The Activity frontend also needs `.env` in `apps/pazaak-world/`:
@@ -181,24 +184,25 @@ The standalone auth modal can now sign in using OAuth providers. Configure one o
 # Google OAuth (Google Cloud Console)
 PAZAAK_OAUTH_GOOGLE_CLIENT_ID=
 PAZAAK_OAUTH_GOOGLE_CLIENT_SECRET=
-PAZAAK_OAUTH_GOOGLE_CALLBACK_URL=http://localhost:4001/api/auth/oauth/google/callback
+PAZAAK_OAUTH_GOOGLE_CALLBACK_URL=https://openkotor.github.io/bots/pazaakworld/api/auth/oauth/google/callback
 
 # Discord OAuth (Discord Developer Portal)
 PAZAAK_OAUTH_DISCORD_CLIENT_ID=
 PAZAAK_OAUTH_DISCORD_CLIENT_SECRET=
-PAZAAK_OAUTH_DISCORD_CALLBACK_URL=http://localhost:4001/api/auth/oauth/discord/callback
+PAZAAK_OAUTH_DISCORD_CALLBACK_URL=https://openkotor.github.io/bots/pazaakworld/api/auth/oauth/discord/callback
 
 # GitHub OAuth (GitHub OAuth Apps)
 PAZAAK_OAUTH_GITHUB_CLIENT_ID=
 PAZAAK_OAUTH_GITHUB_CLIENT_SECRET=
-PAZAAK_OAUTH_GITHUB_CALLBACK_URL=http://localhost:4001/api/auth/oauth/github/callback
+PAZAAK_OAUTH_GITHUB_CALLBACK_URL=https://openkotor.github.io/bots/pazaakworld/api/auth/oauth/github/callback
 ```
 
 Provider setup checklist:
 
 1. Register each callback URL exactly as shown above in the provider console.
-2. For local development, keep bot API on `http://localhost:4001` and Activity on
-   `http://localhost:5173`.
+2. For local API testing, keep the bot API on `http://localhost:4001`; OAuth provider callback
+   registrations should point at the GitHub Pages PazaakWorld URL unless you are using a separate
+   development OAuth app.
 3. Restart `dev:pazaak` after editing `.env`.
 4. In the standalone page, open the top-right auth modal; provider buttons become enabled only when
    each provider is fully configured.
@@ -221,7 +225,7 @@ Notes:
 5. Go to **APIs & Services -> Credentials**.
 6. Create (or open) an **OAuth 2.0 Client ID** of type **Web application**.
 7. Add Authorized redirect URI:
-   - `http://localhost:4001/api/auth/oauth/google/callback`
+   - `https://openkotor.github.io/bots/pazaakworld/api/auth/oauth/google/callback`
 8. Copy the Client ID and Client Secret into:
    - `PAZAAK_OAUTH_GOOGLE_CLIENT_ID`
    - `PAZAAK_OAUTH_GOOGLE_CLIENT_SECRET`
@@ -231,7 +235,7 @@ Notes:
 1. Open [Discord Developer Portal](https://discord.com/developers/applications) and select your Pazaak app.
 2. Go to **OAuth2 -> General**.
 3. Under Redirects, add:
-   - `http://localhost:4001/api/auth/oauth/discord/callback`
+   - `https://openkotor.github.io/bots/pazaakworld/api/auth/oauth/discord/callback`
 4. Save changes.
 5. Copy values:
    - **Client ID** -> `PAZAAK_OAUTH_DISCORD_CLIENT_ID`
@@ -249,8 +253,8 @@ Notes:
 2. Create a **New OAuth App** (or open an existing one).
 3. Set fields:
    - **Application name**: your choice
-   - **Homepage URL**: `http://localhost:5173`
-   - **Authorization callback URL**: `http://localhost:4001/api/auth/oauth/github/callback`
+   - **Homepage URL**: `https://openkotor.github.io/bots/pazaakworld`
+   - **Authorization callback URL**: `https://openkotor.github.io/bots/pazaakworld/api/auth/oauth/github/callback`
 4. Register the app.
 5. Copy values:
    - **Client ID** -> `PAZAAK_OAUTH_GITHUB_CLIENT_ID`
@@ -319,6 +323,14 @@ corepack pnpm dev:pazaak-world
 
 The Vite dev server proxies `/api` and `/ws` to `localhost:4001` automatically.
 
+**Nakama (authoritative Pazaak):** To run matches against the bundled Nakama runtime instead of the
+bot’s embedded HTTP/WebSocket API, start Postgres + Nakama (`pnpm dev:pazaak-nakama` or
+`docker compose -f infra/nakama/docker-compose.yml up` after `pnpm build:pazaak-nakama`), then run
+`pnpm dev:pazaak-world` with client env from `infra/nakama/README.md` (`VITE_PAZAAK_BACKEND=nakama`,
+`VITE_NAKAMA_HOST`, etc.). Gameplay talks to Nakama on port **7350** directly from the browser;
+keep the bot on **4001** if you still need OAuth (`/api/auth/token`) or Trask (`/api/trask/*`), and
+set `VITE_LEGACY_HTTP_ORIGIN=http://localhost:4001` so those routes keep working.
+
 ### 4. Build the Activity for Production
 
 ```bash
@@ -336,7 +348,7 @@ local-only and not committed to the repository.
 
 ## 8. Running the Ingest Worker CLI
 
-The ingest worker is a standalone CLI stub, not a long-running service yet:
+The ingest worker is a standalone CLI that supports both queued and immediate indexing paths:
 
 ```bash
 # List all registered sources
@@ -344,6 +356,15 @@ node --import tsx/esm apps/ingest-worker/src/main.ts list-sources
 
 # Queue a refresh for one source
 node --import tsx/esm apps/ingest-worker/src/main.ts queue-reindex deadlystream
+
+# Process currently queued refresh jobs once
+node --import tsx/esm apps/ingest-worker/src/main.ts drain-queue
+
+# Run a continuous queue worker (polling every 15s by default)
+node --import tsx/esm apps/ingest-worker/src/main.ts run-queue-worker
+
+# Run an immediate refresh without queueing
+node --import tsx/esm apps/ingest-worker/src/main.ts reindex-now deadlystream
 
 # Show loaded config
 node --import tsx/esm apps/ingest-worker/src/main.ts show-config
