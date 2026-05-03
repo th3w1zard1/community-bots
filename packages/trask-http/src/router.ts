@@ -55,7 +55,7 @@ export interface TraskHttpAuth<TUser extends TraskHttpUser = TraskHttpUser> {
 
 
 
-/** Matches Holocron (`vendor/qa-webui`) `TraskSessionDto`. */
+/** Matches Holocron web (`apps/holocron-web`) `TraskSessionDto`. */
 
 export interface TraskHttpSessionDto {
 

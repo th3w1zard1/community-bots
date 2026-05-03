@@ -12,6 +12,3 @@
 	path = wiki
 	url = https://github.com/OpenKotOR/community-bots.wiki.git
 	branch = master
-[submodule "vendor/qa-webui"]
-	path = vendor/qa-webui
-	url = https://github.com/OpenKotOR/qa-trask-webui.git

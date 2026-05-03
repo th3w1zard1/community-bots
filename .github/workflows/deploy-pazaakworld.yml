@@ -84,18 +84,18 @@ jobs:
           VITE_PAZAAK_DISCORD_APPLICATION_ID: ${{ vars.PAZAAK_DISCORD_APP_ID }}
         run: pnpm --filter pazaak-world build
 
-      - name: Build QA Trask WebUI
-        if: hashFiles('vendor/qa-webui/package.json') != ''
+      - name: Build Holocron web (Trask Q&A SPA)
+        if: hashFiles('apps/holocron-web/package.json') != ''
         env:
           BASE: /bots/qa-webui/
           ENABLE_SPARK: "0"
-        run: pnpm --filter spark-template build
+        run: pnpm --filter @openkotor/holocron-web build
 
-      - name: Publish QA Trask WebUI under /bots/qa-webui/
-        if: hashFiles('vendor/qa-webui/package.json') != ''
+      - name: Publish Holocron web under /bots/qa-webui/
+        if: hashFiles('apps/holocron-web/package.json') != ''
         run: |
           mkdir -p apps/pazaak-world/dist/qa-webui
-          cp -R vendor/qa-webui/dist/. apps/pazaak-world/dist/qa-webui/
+          cp -R apps/holocron-web/dist/. apps/pazaak-world/dist/qa-webui/
 
       - name: Build Discord bots hub WebUI (hk86)
         env:

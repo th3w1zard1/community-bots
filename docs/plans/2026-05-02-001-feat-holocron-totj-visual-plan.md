@@ -14,14 +14,14 @@ Ground Holocron Archive in **1990s Dark Horse *Tales of the Jedi*** cues: earthy
 ## Requirements trace
 
 - R1. Lore-adjacent palette and typography without copying specific covers.
-- R2. Repo-local raster assets (HF MCP generation → committed PNGs under `vendor/qa-webui/public/holocron/`).
+- R2. Repo-local raster assets (HF MCP generation → committed PNGs under `apps/holocron-web/public/holocron/`).
 - R3. Subtle motion (float/pulse) on hero holocron prop; non-blocking overlays.
 
 ## Implementation (done)
 
 - **Assets:** `totj-cinematic-panel.png` (wide halftone vignette plate), `holocron-artifact.png` (centered prop) via `user-hf-mcp-server` `gr3_z_image_turbo_mcp_generate`.
-- **UI:** `vendor/qa-webui/src/index.css` — atmosphere layers, halftone grid, vignette, `holocron-float`, TotJ-tuned OKLCH tokens; `vendor/qa-webui/src/App.tsx` — wires layers + images; `vendor/qa-webui/index.html` — Cinzel for serif captions.
-- **Regeneration:** Re-run MCP image tools with similar prompts; replace files in `vendor/qa-webui/public/holocron/` and rebuild.
+- **UI:** `apps/holocron-web/src/index.css` — atmosphere layers, halftone grid, vignette, `holocron-float`, TotJ-tuned OKLCH tokens; `apps/holocron-web/src/App.tsx` — wires layers + images; `apps/holocron-web/index.html` — Cinzel for serif captions.
+- **Regeneration:** Re-run MCP image tools with similar prompts; replace files in `apps/holocron-web/public/holocron/` and rebuild.
 
 ## Non-goals
 
